@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chemical structure</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --muted: #6b6b6b;
+    --paper: #ffffff;     /* light backing so RDKit's dark strokes stay readable in dark mode */
+    --ink: #1a1a1a;       /* text drawn on the paper (+, arrow, conditions) */
+    --ink-muted: #555555;
+    --pick: #2563eb;      /* selection ring */
+    --bar-bg: rgba(127, 127, 127, 0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --muted: #a3a3a3; }
+  }
+  :root[data-theme="dark"] { --muted: #a3a3a3; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; background: transparent; }
+  body { font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  figure { margin: 0; padding: 4px 0; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .paper { background: var(--paper); color: var(--ink); border-radius: 8px; padding: 6px 10px;
+           max-width: 100%; box-sizing: border-box; }
+  figcaption { font-size: 12px; color: var(--muted); text-align: center; }
+
+  /* One drawing: the RDKit SVG as an <img>, with a transparent overlay of click targets per atom */
+  .mol { position: relative; display: inline-block; max-width: 100%; line-height: 0; }
+  .mol img { display: block; max-width: 100%; height: auto; }
+  .mol svg.hits { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+  .hits circle { fill: transparent; stroke: transparent; cursor: pointer; outline: none; }
+  .hits circle:hover { stroke: rgba(37, 99, 235, 0.35); stroke-width: 1.5; }
+  .hits circle.on { fill: rgba(37, 99, 235, 0.12); stroke: var(--pick); stroke-width: 2; }
+  .hits circle:focus-visible { outline: none; stroke: var(--pick); stroke-width: 2; stroke-dasharray: 3 2; }
+
+  /* Reaction scheme: A + B → C, wrapping on narrow screens */
+  .scheme { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 4px 10px; }
+  /* Labels hang below each structure without shifting it, so +, → and all molecules share one centre line. */
+  .scheme.labelled { padding-bottom: 30px; }
+  .species { position: relative; display: flex; justify-content: center; }
+  .species .name { position: absolute; top: 100%; left: 50%; transform: translateX(-50%); margin-top: 2px;
+                   width: max-content; max-width: 150px; font-size: 11px; line-height: 1.3;
+                   color: var(--ink-muted); text-align: center; }
+  .plus { font-size: 18px; color: var(--ink); }
+  .arrow { display: flex; flex-direction: column; align-items: center; min-width: 64px; color: var(--ink); }
+  .arrow .cond { font-size: 12px; text-align: center; max-width: 160px; min-height: 1em; }
+  .arrow svg { display: block; width: 64px; height: 14px; }
+
+  /* Selection bar: appears only while atoms are selected */
+  #bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 10px;
+         margin: 2px auto 4px; padding: 4px 10px; border-radius: 8px; background: var(--bar-bg);
+         font-size: 12px; color: var(--muted); max-width: 100%; box-sizing: border-box; }
+  #bar code { font: 12px ui-monospace, monospace; color: inherit; }
+  #bar button { font: inherit; font-size: 12px; padding: 2px 10px; border-radius: 6px; cursor: pointer;
+                border: 1px solid rgba(127, 127, 127, 0.35); background: transparent; color: inherit; }
+  #bar button.primary { border-color: var(--pick); color: var(--pick); }
+  #copy { width: 100%; text-align: center; user-select: all; font: 11px ui-monospace, monospace; }
+
+  #diag { font: 11px/1.4 ui-monospace, monospace; color: var(--muted); padding: 6px 4px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<figure id="card" hidden>
+  <div class="paper" id="paper"></div>
+  <figcaption id="caption"></figcaption>
+</figure>
+<div id="bar" hidden>
+  <span id="bar-text"></span>
+  <button id="ask" class="primary" type="button">提问</button>
+  <button id="clear" type="button">清除</button>
+  <div id="copy" hidden></div>
+</div>
+<div id="diag" hidden></div>
+<script>
+  "use strict";
+
+  // ---- State & diagnostics -------------------------------------------------
+  // If nothing is drawn after DIAG_AFTER_MS, the card shows what it received,
+  // so a blank card in a real host can be diagnosed from a screenshot.
+  const DIAG_AFTER_MS = 4000;
+  const state = {
+    init: "pending", hostCaps: null, received: [], toolInput: null, fallback: "",
+    started: false, rendered: false, toolError: false,
+  };
+
+  function log(...args) { console.log("[chemcard]", ...args); }
+  function note(method, params) {
+    const keys = params && typeof params === "object" ? Object.keys(params).join(",") : "";
+    const name = method.replace("ui/notifications/", "");
+    state.received.push(keys ? `${name}[${keys}]` : name);
+  }
+  function capsText() {
+    return state.hostCaps ? Object.keys(state.hostCaps).join(",") || "（空）" : "（未知）";
+  }
+  function showDiag() {
+    if (state.rendered || state.toolError) return;
+    const el = document.getElementById("diag");
+    el.textContent =
+      "chemcard 调试（结构未显示）\n" +
+      `init: ${state.init}\n` +
+      `宿主能力: ${capsText()}\n` +
+      `收到: ${state.received.join("  ") || "（无）"}\n` +
+      (state.fallback ? `回退: ${state.fallback}\n` : "");
+    el.hidden = false;
+    scheduleSize();
+  }
+  setTimeout(showDiag, DIAG_AFTER_MS);
+
+  // ---- Drawing retrieval ---------------------------------------------------
+  // The server puts drawings in `_meta` (widget-only). Claude does not forward
+  // `_meta`, so fall back to the app-only tool render_structure_svg.
+  function callTool(name, args) {
+    return request("tools/call", { name, arguments: args }).then((r) => {
+      if (!r || r.isError) throw new Error(`${name} failed`);
+      return r.structuredContent;
+    });
+  }
+  function drawingOrFetch(drawn, species) {
+    if (drawn && drawn.svg) return Promise.resolve(drawn);
+    if (!species.canonical_smiles) return Promise.reject(new Error("no _meta drawing and no SMILES"));
+    state.fallback = "没有 _meta 图，改用 tools/call 获取…";
+    return callTool("render_structure_svg", { smiles: species.canonical_smiles, highlight: species.highlight || null })
+      .then((s) => { state.fallback = "tools/call 成功"; return s; });
+  }
+
+  // ---- Rendering -----------------------------------------------------------
+  // structuredContent.kind selects the layout (see server.py):
+  //   "structure": { canonical_smiles, formula, label, highlight? }      _meta: { svg, width, height, atoms }
+  //   "reaction":  { caption, conditions, reversible,
+  //                  reactants: [{label, canonical_smiles, formula, highlight?}], products: [...] }
+  //                                                                       _meta: { reactants: [{svg,…}], products: [...] }
+  // On isError the model is told to fix its input and retry, so draw nothing.
+  function onToolResult(result) {
+    if (!result || state.started) return;   // a host may deliver the result more than once
+    state.started = true;
+    if (result.isError) { state.toolError = true; return; }
+    const data = result.structuredContent || {};
+    const meta = result._meta || {};
+    const job = data.kind === "reaction" ? renderReaction(data, meta) : renderStructure(data, meta);
+    job.then(finish, (err) => { state.fallback = "失败: " + (err && err.message ? err.message : JSON.stringify(err)); });
+  }
+
+  function renderStructure(data, meta) {
+    const input = state.toolInput || {};
+    const label = data.label || input.label || "";
+    return drawingOrFetch(meta, data).then((d) => {
+      paper().appendChild(molView(d, data, label || data.formula || "molecule"));
+      setCaption(label || data.formula || "");
+    });
+  }
+
+  function renderReaction(data, meta) {
+    const sides = ["reactants", "products"];
+    const jobs = sides.map((side) =>
+      Promise.all((data[side] || []).map((sp, i) => drawingOrFetch((meta[side] || [])[i], sp))));
+    return Promise.all(jobs).then(([left, right]) => {
+      const scheme = document.createElement("div");
+      scheme.className = "scheme";
+      if ([...data.reactants, ...data.products].some((sp) => sp.label)) scheme.classList.add("labelled");
+      appendSide(scheme, data.reactants, left);
+      scheme.appendChild(arrowEl(data.conditions, data.reversible));
+      appendSide(scheme, data.products, right);
+      paper().appendChild(scheme);
+      setCaption(data.caption || "");
+    });
+  }
+
+  function appendSide(scheme, species, drawings) {
+    species.forEach((sp, i) => {
+      if (i > 0) {
+        const plus = document.createElement("span");
+        plus.className = "plus";
+        plus.textContent = "+";
+        scheme.appendChild(plus);
+      }
+      const box = document.createElement("div");
+      box.className = "species";
+      box.appendChild(molView(drawings[i], sp, sp.label || sp.formula || "species"));
+      if (sp.label) {
+        const name = document.createElement("div");
+        name.className = "name";
+        name.textContent = sp.label;
+        box.appendChild(name);
+      }
+      scheme.appendChild(box);
+    });
+  }
+
+  // One molecule: <img> of the SVG plus an overlay of one click target per atom.
+  const SVGNS = "http://www.w3.org/2000/svg";
+  function molView(d, species, name) {
+    const wrap = document.createElement("div");
+    wrap.className = "mol";
+    const img = document.createElement("img");
+    img.onload = scheduleSize;
+    // <img> + data: URI: the SVG cannot run scripts, and the default CSP allows data: images.
+    img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(d.svg);
+    if (d.width) img.width = d.width;
+    if (d.height) img.height = d.height;
+    img.alt = "Structure of " + name;
+    wrap.appendChild(img);
+
+    if (d.atoms && d.atoms.length && d.width && d.height && species.canonical_smiles) {
+      const hits = document.createElementNS(SVGNS, "svg");
+      hits.setAttribute("class", "hits");
+      hits.setAttribute("viewBox", `0 0 ${d.width} ${d.height}`);
+      d.atoms.forEach((a, i) => {
+        const c = document.createElementNS(SVGNS, "circle");
+        c.setAttribute("cx", a.x);
+        c.setAttribute("cy", a.y);
+        c.setAttribute("r", 9);
+        c.setAttribute("tabindex", "0");
+        c.setAttribute("role", "button");
+        c.setAttribute("aria-label", `${a.el} 原子 ${i + 1}`);
+        const toggle = () => toggleAtom({ smiles: species.canonical_smiles, name, atoms: d.atoms }, i, c);
+        c.addEventListener("click", toggle);
+        c.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+        hits.appendChild(c);
+      });
+      wrap.appendChild(hits);
+    }
+    return wrap;
+  }
+
+  function arrowEl(conditions, reversible) {
+    const box = document.createElement("div");
+    box.className = "arrow";
+    const cond = document.createElement("div");
+    cond.className = "cond";
+    cond.textContent = conditions || "";
+    box.appendChild(cond);
+    box.insertAdjacentHTML("beforeend", reversible
+      ? '<svg viewBox="0 0 64 14" aria-label="equilibrium"><path d="M2 5 H60 L54 1" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M62 9 H4 L10 13" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>'
+      : '<svg viewBox="0 0 64 14" aria-label="yields"><path d="M2 7 H60" stroke="currentColor" stroke-width="1.4"/><path d="M54 3 L61 7 L54 11 Z" fill="currentColor"/></svg>');
+    return box;
+  }
+
+  function paper() { return document.getElementById("paper"); }
+  function setCaption(text) { document.getElementById("caption").textContent = text; }
+  function finish() {
+    document.getElementById("card").hidden = false;
+    document.getElementById("diag").hidden = true;
+    state.rendered = true;
+    scheduleSize();
+  }
+
+  function applyContext(ctx) {
+    if (ctx && (ctx.theme === "light" || ctx.theme === "dark")) {
+      document.documentElement.dataset.theme = ctx.theme;
+    }
+  }
+
+  // ---- Atom selection → model ----------------------------------------------
+  // Click atoms in one molecule; the server turns them into a fragment SMILES and
+  // an atom-mapped SMILES. The selection is pushed to the model's context
+  // (ui/update-model-context, if the host supports it) and "提问" puts a message
+  // in the chat (ui/message; Claude pre-fills the composer or asks for consent).
+  const sel = { mol: null, atoms: [], circles: new Map(), desc: null, seq: 0 };
+
+  function toggleAtom(mol, index, circle) {
+    if (sel.mol && sel.mol.smiles !== mol.smiles) clearSelection(false);  // one molecule at a time
+    if (!sel.mol || sel.mol.smiles !== mol.smiles) sel.mol = mol;
+    const at = sel.atoms.indexOf(index);
+    if (at >= 0) {
+      sel.atoms.splice(at, 1);
+      circle.classList.remove("on");
+      sel.circles.delete(index);
+    } else {
+      sel.atoms.push(index);
+      circle.classList.add("on");
+      sel.circles.set(index, circle);
+    }
+    onSelectionChanged();
+  }
+
+  function clearSelection(push = true) {
+    sel.circles.forEach((c) => c.classList.remove("on"));
+    sel.circles.clear();
+    sel.atoms = [];
+    sel.mol = null;
+    sel.desc = null;
+    if (push) onSelectionChanged();
+  }
+
+  let describeTimer = null;
+  function onSelectionChanged() {
+    const bar = document.getElementById("bar");
+    document.getElementById("copy").hidden = true;
+    if (!sel.atoms.length) {
+      bar.hidden = true;
+      pushContext(null);
+      scheduleSize();
+      return;
+    }
+    bar.hidden = false;
+    document.getElementById("bar-text").textContent = `已选 ${sel.atoms.length} 个原子…`;
+    scheduleSize();
+    clearTimeout(describeTimer);
+    const seq = ++sel.seq;
+    describeTimer = setTimeout(() => {
+      callTool("describe_selection", { smiles: sel.mol.smiles, atoms: sel.atoms }).then((d) => {
+        if (seq !== sel.seq) return;  // a newer click superseded this one
+        sel.desc = d;
+        const els = d.atoms.map((a) => a.element).join("、");
+        document.getElementById("bar-text").innerHTML = "";
+        const t = document.getElementById("bar-text");
+        t.append(`已选 ${els}（片段 `);
+        const code = document.createElement("code");
+        code.textContent = d.fragment_smiles;
+        t.append(code, "）");
+        pushContext(d);
+        scheduleSize();
+      }, (err) => {
+        document.getElementById("bar-text").textContent = `已选 ${sel.atoms.length} 个原子（无法解析：${err.message}）`;
+      });
+    }, 200);
+  }
+
+  function selectionText(d) {
+    const where = sel.mol && sel.mol.name ? `「${sel.mol.name}」中` : "";
+    return `我在结构图${where}选中了 ${d.atoms.map((a) => `${a.element}（编号 ${a.map}）`).join("、")}。` +
+      `片段：${d.fragment_smiles}；带原子编号的完整 SMILES：${d.mapped_smiles}`;
+  }
+
+  // Model-only context (not shown as a chat message): the selection plus how to point back at it.
+  function contextText(d) {
+    const nums = d.atoms.map((a) => a.map).join(", ");
+    return selectionText(d) +
+      ` 回答时如需画这个分子，请用这个带编号的 SMILES，并以 highlights=[{"atoms":[${nums}]}] 标出这些原子。`;
+  }
+
+  function pushContext(d) {
+    if (!state.hostCaps || !state.hostCaps.updateModelContext) return;
+    const text = d ? contextText(d) : "（用户已清除结构图中的原子选择）";
+    const params = { content: [{ type: "text", text }] };
+    request("ui/update-model-context", params).catch((err) => log("update-model-context failed", err));
+  }
+
+  document.getElementById("clear").addEventListener("click", () => clearSelection(true));
+  document.getElementById("ask").addEventListener("click", () => {
+    if (!sel.desc) return;
+    const text = selectionText(sel.desc) + "\n";
+    request("ui/message", { role: "user", content: [{ type: "text", text }] }).then((r) => {
+      if (r && r.isError) showCopy(text);
+    }, () => showCopy(text));
+  });
+  // Host cannot take the message: show the text so the user can copy it.
+  function showCopy(text) {
+    const el = document.getElementById("copy");
+    el.textContent = text.trim();
+    el.hidden = false;
+    scheduleSize();
+  }
+
+  // ---- MCP Apps host bridge (JSON-RPC 2.0 over postMessage) ---------------
+  // Wire format follows the official ext-apps App class (protocol 2026-01-26).
+  const PROTOCOL_VERSION = "2026-01-26";
+  const pending = new Map();
+  let nextId = 1;
+
+  function send(message) { window.parent.postMessage(message, "*"); }
+  function reply(id, result) { send({ jsonrpc: "2.0", id, result }); }
+  function notify(method, params) {
+    const message = { jsonrpc: "2.0", method };
+    if (params) message.params = params;
+    send(message);
+  }
+  function request(method, params) {
+    const id = nextId++;
+    send({ jsonrpc: "2.0", id, method, params });
+    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+  }
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    const msg = event.data;
+    if (!msg || msg.jsonrpc !== "2.0") return;
+    log("received", msg);
+
+    if (msg.method === undefined) {           // response to one of our requests
+      const p = pending.get(msg.id);
+      if (!p) return;
+      pending.delete(msg.id);
+      msg.error ? p.reject(msg.error) : p.resolve(msg.result);
+      return;
+    }
+    note(msg.method, msg.params);
+    switch (msg.method) {
+      case "ui/notifications/tool-input":
+        state.toolInput = (msg.params && msg.params.arguments) || null;
+        break;
+      case "ui/notifications/tool-result":
+        onToolResult(msg.params);
+        break;
+      case "ui/notifications/host-context-changed":
+        applyContext(msg.params);
+        break;
+      case "ui/resource-teardown":
+      case "ping":
+        reply(msg.id, {});
+        break;
+      default:
+        if (msg.id !== undefined) {
+          send({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } });
+        }
+    }
+  });
+
+  // ---- Size reporting: let the host fit the frame (no inner scrolling) -----
+  let lastSize = { width: 0, height: 0 };
+  let sizeScheduled = false;
+  function measure() {
+    sizeScheduled = false;
+    const html = document.documentElement;
+    const prev = html.style.height;
+    html.style.height = "max-content";
+    const height = Math.ceil(html.getBoundingClientRect().height);
+    html.style.height = prev;
+    const width = Math.ceil(window.innerWidth);
+    // Never report 0: Claude's docs name a 0-height report as a cause of blank cards.
+    // Nothing to show yet → stay silent; ResizeObserver fires again once content appears.
+    if (width === 0 || height === 0) return;
+    if (width !== lastSize.width || height !== lastSize.height) {
+      lastSize = { width, height };
+      notify("ui/notifications/size-changed", lastSize);
+    }
+  }
+  function scheduleSize() {
+    if (!sizeScheduled) { sizeScheduled = true; requestAnimationFrame(measure); }
+  }
+  function observeSize() {
+    const ro = new ResizeObserver(scheduleSize);
+    ro.observe(document.documentElement);
+    ro.observe(document.body);
+    scheduleSize();
+  }
+
+  // ---- Handshake -----------------------------------------------------------
+  // Even if ui/initialize fails, announce readiness: some hosts may still send results.
+  function ready() {
+    notify("ui/notifications/initialized");
+    observeSize();
+  }
+  request("ui/initialize", {
+    appInfo: { name: "chemcard-card", version: "0.3.0" },
+    appCapabilities: {},
+    protocolVersion: PROTOCOL_VERSION,
+  }).then((result) => {
+    state.init = "ok" + (result && result.protocolVersion ? ` (${result.protocolVersion})` : "");
+    state.hostCaps = (result && result.hostCapabilities) || {};
+    log("host capabilities", state.hostCaps);
+    applyContext(result && result.hostContext);
+    ready();
+  }, (error) => {
+    state.init = "failed: " + JSON.stringify(error);
+    log("ui/initialize failed", error);
+    ready();
+  });
+
+  // ---- ChatGPT compatibility fallback (legacy window.openai globals) -------
+  function fromOpenAI() {
+    const o = window.openai;
+    if (!o) return;
+    applyContext({ theme: o.theme });
+    if (o.toolOutput && o.toolResponseMetadata) {
+      onToolResult({ structuredContent: o.toolOutput, _meta: o.toolResponseMetadata });
+    }
+  }
+  window.addEventListener("openai:set_globals", fromOpenAI);
+  fromOpenAI();
+
+  // ---- Debug: Shift+click the caption to show what the host offers ----------
+  document.getElementById("caption").addEventListener("click", (e) => {
+    if (!e.shiftKey) return;
+    const el = document.getElementById("diag");
+    el.textContent = `init: ${state.init}\n宿主能力: ${capsText()}\n收到: ${state.received.join("  ")}`;
+    el.hidden = !el.hidden;
+    scheduleSize();
+  });
+</script>
+</body>
+</html>
