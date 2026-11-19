@@ -77,6 +77,14 @@ NEXT_AFTER_STEP = (
     "Only after that, draw the next step."
 )
 
+# Returned when the SMILES is valid but chemcard cannot draw it faithfully
+# (e.g. a specified E/Z geometry no layout reproduces). Must not invite the model
+# to "fix" a correct structure until it becomes drawable.
+UNDRAWABLE = (
+    "the SMILES is valid, but chemcard cannot draw this structure faithfully. "
+    "Do not change the structure to make it drawable; describe it in text instead."
+)
+
 SMILES_PARAM = (
     "SMILES of the molecule. Use '*' for a generic substituent R. "
     "Write stereochemistry (@, @@, /, \\) only when it matters for the explanation."

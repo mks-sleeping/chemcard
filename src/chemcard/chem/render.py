@@ -10,11 +10,15 @@ import contextlib
 import io
 import math
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
+from functools import partial
 
 from rdkit import Chem, rdBase
 from rdkit.Chem import rdCoordGen, rdDepictor, rdMolDescriptors
 from rdkit.Chem.Draw import rdMolDraw2D
+
+from chemcard.chem.bridged_layout import GAP_FRACTION, bridge_candidates, bridge_gaps
 
 MAX_SMILES_LEN = 500
 MAX_HEAVY_ATOMS = 150
@@ -31,6 +35,13 @@ class InvalidSmiles(ValueError):
 
     The message is returned to the model verbatim, so write it so the model
     can fix its input (say what is wrong and, if possible, where).
+    """
+
+
+class UndrawableStructure(ValueError):
+    """The SMILES is valid, but no layout shows it faithfully (e.g. a specified E/Z
+    geometry that no candidate reproduces). Kept apart from InvalidSmiles so the
+    model is not told to "fix" a correct structure.
     """
 
 
@@ -158,7 +169,7 @@ def _draw(
     # coordinate queries.
     if layout:
         _layout(mol)
-        rdDepictor.NormalizeDepiction(mol)  # canonical orientation, uniform bond length
+        normalize_layout(mol)
     measured = _median_bond_px(_drawer_with(mol), mol)
     if measured:
         factor = BOND_LENGTH_PX / measured
@@ -174,6 +185,7 @@ def _draw(
     for i in range(mol.GetNumAtoms()):
         p = drawer.GetDrawCoords(i)
         coords.append((round(p.x, 1), round(p.y, 1)))
+    svg = bridge_gaps(svg, mol, coords)
     if drawer_out is not None:
         drawer_out.append(drawer)
     return svg, int(drawer.Width()), int(drawer.Height()), coords
@@ -205,49 +217,103 @@ _TEMPLATE_SCAFFOLDS = {  # most specific first
 }
 
 
-def _layout(mol: Chem.Mol) -> str:
-    """Compute 2D coordinates, choosing the layout that draws this molecule best.
-
-    1. Scaffold templates win outright: hand-picked textbook coordinates for
-       skeletons every engine draws badly (morphinans: the N bridge ended up
-       across the rings). Textbook drawings are conventions, not derivable.
-    2. Otherwise several engines each lay the molecule out and the one with the
-       best `layout_quality` score is kept (fewest bond crossings, no clashing
-       atoms, no atom sitting on a bond, even bond lengths). Ties go to the
-       earlier engine in LAYOUT_ENGINES, so ordinary molecules keep CoordGen.
-
-    Returns which layout was used ("template:<name>" or an engine name).
-    """
+def layout_candidates(mol: Chem.Mol) -> Iterator[tuple[str, Chem.Mol]]:
+    """Yield independent drawings in preference order. Atom indices stay fixed."""
+    mol = Chem.Mol(mol)
+    for bond in mol.GetBonds():
+        bond.ClearProp(GAP_FRACTION)
     for name, ref, scaffold in _scaffold_templates():
-        if mol.HasSubstructMatch(scaffold):
-            try:
-                rdDepictor.GenerateDepictionMatching2DStructure(mol, ref, refPatt=scaffold, acceptFailure=False)
-                if not _has_nan(mol):
-                    return f"template:{name}"
-            except ValueError:
-                pass  # fall through to the generic engines
+        if not mol.HasSubstructMatch(scaffold):
+            continue
+        trial = Chem.Mol(mol)
+        try:
+            # On the reference molecule itself retain the substituent coordinates too.
+            if Chem.MolToSmiles(ref) == Chem.MolToSmiles(mol):
+                mapping = ref.GetSubstructMatch(mol, useChirality=True)
+                rdDepictor.GenerateDepictionMatching2DStructure(trial, ref, list(zip(mapping, range(len(mapping)))))
+            else:
+                rdDepictor.GenerateDepictionMatching2DStructure(trial, ref, refPatt=scaffold, acceptFailure=False)
+        except (RuntimeError, ValueError):
+            continue
+        yield f"template:{name}", trial
 
-    best = None
+    yield from bridge_candidates(mol)
+
     for name, engine in LAYOUT_ENGINES:
         trial = Chem.Mol(mol)
         try:
             engine(trial)
         except (RuntimeError, ValueError):
             continue
-        if not trial.GetNumConformers() or _has_nan(trial):
-            continue  # e.g. CoordGen on a lone H+
-        score = layout_quality(trial)["score"]
-        # switch away from the preferred engine only for a real improvement, not for
-        # a slightly more uniform bond length (CoordGen's are never exactly equal)
-        if best is None or score < best[0] - LAYOUT_MIN_GAIN:
-            best = (score, name, trial)
-    if best is None:  # nothing worked: RDKit's own depictor always produces something
-        rdDepictor.Compute2DCoords(mol)
-        return "rdkit"
-    _, name, trial = best
+        yield name, trial
+
+
+def layout_problem(mol: Chem.Mol, trial: Chem.Mol) -> str | None:
+    """Validate candidate coordinates against the stereo specified on the input."""
+    if not trial.GetNumConformers():
+        return "missing coordinates"
+    pos = trial.GetConformer().GetPositions()
+    if not all(math.isfinite(v) for point in pos for v in point):
+        return "non-finite coordinates"
+    stereo = Chem.BondStereo
+    for bond in mol.GetBonds():
+        tag = bond.GetStereo()
+        if tag not in (stereo.STEREOE, stereo.STEREOZ, stereo.STEREOCIS, stereo.STEREOTRANS):
+            continue
+        left, right = bond.GetStereoAtoms()
+        start, end = pos[bond.GetBeginAtomIdx()], pos[bond.GetEndAtomIdx()]
+        dx, dy = (end - start)[:2]
+        # Signed areas on each side of the double-bond axis; tolerate coordinate noise.
+        def side(i):
+            x, y = (pos[i] - start)[:2]
+            return dx * y - dy * x
+        a, b = side(left), side(right)
+        eps = 1e-6 * (dx * dx + dy * dy)
+        same_side = tag in (stereo.STEREOZ, stereo.STEREOCIS)
+        if min(abs(a), abs(b)) <= eps or (a * b > 0) != same_side:
+            return f"double-bond geometry at bond {bond.GetIdx()}"
+    return None
+
+
+def _layout(mol: Chem.Mol) -> str:
+    """Prefer valid reference and clear cage views, then compare geometric quality."""
+    best = None
+    for name, trial in layout_candidates(mol):
+        if layout_problem(mol, trial):
+            continue
+        if name.startswith("template:"):
+            best = (0, 0, name, trial)
+            break
+        quality = layout_quality(trial)
+        # A clear, depth-cued cage keeps the conventional view. If substituents
+        # collide, it competes on geometry alongside the general engines.
+        clear_bridge = (name.startswith("bridge-") and quality["crossings"] == 1
+                        and not any(quality[k] for k in ("clashes", "on_bond", "inside", "label_contacts")))
+        rank = 0 if clear_bridge else 1
+        score = quality["score"]
+        if best is None or rank < best[0] or (rank == best[0] and score < best[1] - LAYOUT_MIN_GAIN):
+            best = (rank, score, name, trial)
+    if best is None:
+        trial = Chem.Mol(mol)
+        rdDepictor.Compute2DCoords(trial, forceRDKit=True)
+        problem = layout_problem(mol, trial)
+        if problem:
+            raise UndrawableStructure(f"no 2D layout reproduces the specified structure ({problem})")
+        best = (1, 0, "rdkit", trial)
+    _, _, name, trial = best
+    for target, source in zip(mol.GetBonds(), trial.GetBonds()):
+        target.ClearProp(GAP_FRACTION)
+        if source.HasProp(GAP_FRACTION):
+            target.SetDoubleProp(GAP_FRACTION, source.GetDoubleProp(GAP_FRACTION))
     mol.RemoveAllConformers()
     mol.AddConformer(Chem.Conformer(trial.GetConformer()), assignId=True)
     return name
+
+
+def normalize_layout(mol: Chem.Mol) -> None:
+    # Preserve the intentional upright view of a bridge while normalizing its scale.
+    has_bridge = any(b.HasProp(GAP_FRACTION) for b in mol.GetBonds())
+    rdDepictor.NormalizeDepiction(mol, canonicalize=0 if has_bridge else 1)
 
 
 def _rdkit_templates(m: Chem.Mol) -> None:
@@ -272,6 +338,7 @@ def layout_quality(mol: Chem.Mol) -> dict:
     - inside: atoms that are in no ring but sit inside a ring's polygon (a substituent
       drawn into a ring, e.g. CoordGen's N-methyl of tropinone). Bridge atoms inside
       another ring are the normal way to draw bridged systems and are not counted.
+    - label_contacts: estimated atom-label overlaps with a nonincident bond
     - spread: coefficient of variation of the bond lengths
     """
     import itertools
@@ -279,7 +346,7 @@ def layout_quality(mol: Chem.Mol) -> dict:
     pos = mol.GetConformer().GetPositions()[:, :2]
     bonds = [(b.GetBeginAtomIdx(), b.GetEndAtomIdx()) for b in mol.GetBonds()]
     if not bonds:
-        return {"score": 0.0, "crossings": 0, "clashes": 0, "on_bond": 0, "inside": 0, "spread": 0.0}
+        return {"score": 0.0, "crossings": 0, "clashes": 0, "on_bond": 0, "inside": 0, "label_contacts": 0, "spread": 0.0}
     lengths = [math.dist(pos[a], pos[b]) for a, b in bonds]
     unit = sorted(lengths)[len(lengths) // 2] or 1.0
 
@@ -294,13 +361,30 @@ def layout_quality(mol: Chem.Mol) -> dict:
            side(pos[a], pos[b], pos[c]) * side(pos[a], pos[b], pos[d]) < 0:
             crossings += 1
     n = len(pos)
-    clashes = sum(1 for i, j in itertools.combinations(range(n), 2) if math.dist(pos[i], pos[j]) < 0.5 * unit)
+    clashes = 0
+    crowding = 0.0
+    for i, j in itertools.combinations(range(n), 2):
+        separation = math.dist(pos[i], pos[j]) / unit
+        if separation < 0.5:
+            clashes += 1
+            crowding += 1 - 2 * separation
+    # Approximate label clearance at the fixed font/bond scale used on the card.
+    # This stays rotation invariant when a reactant turns to face its partner.
+    label_radius = []
+    for atom in mol.GetAtoms():
+        visible = (atom.GetAtomicNum() != 6 or atom.GetFormalCharge() or atom.GetIsotope())
+        chars = len(atom.GetSymbol()) + bool(atom.GetTotalNumHs()) + bool(atom.GetFormalCharge())
+        label_radius.append((0.52 + 0.20 * (chars - 1)) * FONT_SIZE_PX / BOND_LENGTH_PX if visible else 0)
+    label_contacts = 0
     on_bond = 0
     for i in range(n):
         for a, b in bonds:
             if i in (a, b):
                 continue
-            if _point_segment_distance(pos[i], pos[a], pos[b]) < 0.3 * unit:
+            separation = _point_segment_distance(pos[i], pos[a], pos[b]) / unit
+            if separation < label_radius[i]:
+                label_contacts += 1
+            if separation < 0.3:
                 on_bond += 1
     ring_info = mol.GetRingInfo()
     in_ring = {i for ring in ring_info.AtomRings() for i in ring}
@@ -312,9 +396,13 @@ def layout_quality(mol: Chem.Mol) -> dict:
             inside += 1
     mean = sum(lengths) / len(lengths)
     spread = (sum((x - mean) ** 2 for x in lengths) / len(lengths)) ** 0.5 / mean if mean else 0.0
-    score = 10 * crossings + 8 * clashes + 8 * inside + 6 * on_bond + 5 * spread
+    # The intended crossover has a visible gap in the final SVG. Other crossings
+    # and near-contacts on either bond still count.
+    marked = sum(b.HasProp(GAP_FRACTION) for b in mol.GetBonds())
+    score = (10 * max(0, crossings - marked) + 8 * (clashes + crowding) + 8 * inside
+             + 6 * on_bond + 4 * label_contacts + 5 * spread)
     return {"score": round(score, 4), "crossings": crossings, "clashes": clashes, "on_bond": on_bond,
-            "inside": inside, "spread": round(spread, 4)}
+            "inside": inside, "label_contacts": label_contacts, "spread": round(spread, 4)}
 
 
 def _inside_polygon(p, poly) -> bool:
@@ -336,10 +424,6 @@ def _point_segment_distance(p, a, b) -> float:
     return math.dist(p, (a[0] + t * dx, a[1] + t * dy))
 
 
-def _has_nan(mol: Chem.Mol) -> bool:
-    return any(math.isnan(c) for p in mol.GetConformer().GetPositions() for c in p)
-
-
 def _drawer_with(
     mol: Chem.Mol,
     atom_colors: dict[int, str] | None = None,
@@ -352,13 +436,20 @@ def _drawer_with(
     opts.scaleBondWidth = False
     opts.padding = PADDING
     opts.clearBackground = False
+    # RDKit otherwise adds an H at a back bridgehead, directly over the cage.
+    # Keep input-explicit Hs and let the existing bonds carry the stereo wedges.
+    if any(b.HasProp(GAP_FRACTION) for b in mol.GetBonds()):
+        mol = rdMolDraw2D.PrepareMolForDrawing(mol, addChiralHs=False)
+        opts.prepareMolsBeforeDrawing = False
+        draw = drawer.DrawMolecule
+    else:
+        draw = partial(rdMolDraw2D.PrepareAndDrawMolecule, drawer)
     if atom_colors or bond_colors:
         opts.highlightRadius = 0.38                   # in bond-length-ish units: a clear halo
         opts.highlightBondWidthMultiplier = 14        # wide marker stroke behind highlighted bonds
         opts.standardColoursForHighlightedAtoms = True  # keep O red, N blue inside a highlight
         opts.continuousHighlight = True
-        rdMolDraw2D.PrepareAndDrawMolecule(
-            drawer,
+        draw(
             mol,
             highlightAtoms=list(atom_colors or {}),
             highlightBonds=list(bond_colors or {}),
@@ -366,7 +457,7 @@ def _drawer_with(
             highlightBondColors={i: HIGHLIGHT_RGB[c] for i, c in (bond_colors or {}).items()},
         )
     else:
-        rdMolDraw2D.PrepareAndDrawMolecule(drawer, mol)
+        draw(mol)
     drawer.FinishDrawing()
     return drawer
 

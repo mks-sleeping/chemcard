@@ -20,7 +20,6 @@ import math
 from dataclasses import dataclass, field
 
 from rdkit import Chem
-from rdkit.Chem import rdDepictor
 from rdkit.Geometry import Point2D
 
 from chemcard.chem.highlight import canonical_maps
@@ -31,6 +30,7 @@ from chemcard.chem.render import (
     _label_dummies,
     _layout,
     mol_from_smiles,
+    normalize_layout,
 )
 
 MAX_ARROWS = 8
@@ -132,7 +132,7 @@ def compose(
         m = mol_from_smiles(c)
         _label_dummies(m)
         _layout(m)
-        rdDepictor.NormalizeDepiction(m)
+        normalize_layout(m)
         mols.append(m)
 
     _face_partners(mols, arrows)
