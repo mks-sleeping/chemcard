@@ -149,3 +149,19 @@ def test_quality_counts_crossings_and_clashes():
         conf.SetAtomPosition(i, Point3D(x, y, 0))
     m.AddConformer(conf)
     assert layout_quality(m)["crossings"] == 1
+
+
+@pytest.mark.parametrize("smiles, same_side", [(r"C1/C=C\CCCCC1", True), ("C1/C=C/CCCCC1", False)])
+def test_cyclooctene_geometry_on_the_final_card(smiles, same_side):
+    from rdkit import Chem
+
+    card = render_smiles(smiles)
+    mol = Chem.MolFromSmiles(card.canonical_smiles)
+    bond = next(b for b in mol.GetBonds() if b.GetBondType() == Chem.BondType.DOUBLE)
+    a, b = [card.atoms[i] for i in (bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())]
+    signs = []
+    for i in bond.GetStereoAtoms():
+        p = card.atoms[i]
+        signs.append((b["x"] - a["x"]) * (p["y"] - a["y"]) - (b["y"] - a["y"]) * (p["x"] - a["x"]))
+    assert all(abs(v) > 1 for v in signs)
+    assert (signs[0] * signs[1] > 0) == same_side

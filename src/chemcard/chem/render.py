@@ -10,6 +10,7 @@ import contextlib
 import io
 import math
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from rdkit import Chem, rdBase
@@ -205,45 +206,78 @@ _TEMPLATE_SCAFFOLDS = {  # most specific first
 }
 
 
-def _layout(mol: Chem.Mol) -> str:
-    """Compute 2D coordinates, choosing the layout that draws this molecule best.
-
-    1. Scaffold templates win outright: hand-picked textbook coordinates for
-       skeletons every engine draws badly (morphinans: the N bridge ended up
-       across the rings). Textbook drawings are conventions, not derivable.
-    2. Otherwise several engines each lay the molecule out and the one with the
-       best `layout_quality` score is kept (fewest bond crossings, no clashing
-       atoms, no atom sitting on a bond, even bond lengths). Ties go to the
-       earlier engine in LAYOUT_ENGINES, so ordinary molecules keep CoordGen.
-
-    Returns which layout was used ("template:<name>" or an engine name).
-    """
+def layout_candidates(mol: Chem.Mol) -> Iterator[tuple[str, Chem.Mol]]:
+    """Yield independent drawings in preference order. Atom indices stay fixed."""
     for name, ref, scaffold in _scaffold_templates():
-        if mol.HasSubstructMatch(scaffold):
-            try:
-                rdDepictor.GenerateDepictionMatching2DStructure(mol, ref, refPatt=scaffold, acceptFailure=False)
-                if not _has_nan(mol):
-                    return f"template:{name}"
-            except ValueError:
-                pass  # fall through to the generic engines
+        if not mol.HasSubstructMatch(scaffold):
+            continue
+        trial = Chem.Mol(mol)
+        try:
+            # On the reference molecule itself retain the substituent coordinates too.
+            if Chem.MolToSmiles(ref) == Chem.MolToSmiles(mol):
+                mapping = ref.GetSubstructMatch(mol, useChirality=True)
+                rdDepictor.GenerateDepictionMatching2DStructure(trial, ref, list(zip(mapping, range(len(mapping)))))
+            else:
+                rdDepictor.GenerateDepictionMatching2DStructure(trial, ref, refPatt=scaffold, acceptFailure=False)
+        except (RuntimeError, ValueError):
+            continue
+        yield f"template:{name}", trial
 
-    best = None
     for name, engine in LAYOUT_ENGINES:
         trial = Chem.Mol(mol)
         try:
             engine(trial)
         except (RuntimeError, ValueError):
             continue
-        if not trial.GetNumConformers() or _has_nan(trial):
-            continue  # e.g. CoordGen on a lone H+
+        yield name, trial
+
+
+def layout_problem(mol: Chem.Mol, trial: Chem.Mol) -> str | None:
+    """Validate candidate coordinates against the stereo specified on the input."""
+    if not trial.GetNumConformers():
+        return "missing coordinates"
+    pos = trial.GetConformer().GetPositions()
+    if not all(math.isfinite(v) for point in pos for v in point):
+        return "non-finite coordinates"
+    stereo = Chem.BondStereo
+    for bond in mol.GetBonds():
+        tag = bond.GetStereo()
+        if tag not in (stereo.STEREOE, stereo.STEREOZ, stereo.STEREOCIS, stereo.STEREOTRANS):
+            continue
+        left, right = bond.GetStereoAtoms()
+        start, end = pos[bond.GetBeginAtomIdx()], pos[bond.GetEndAtomIdx()]
+        dx, dy = (end - start)[:2]
+        # Signed areas on each side of the double-bond axis; tolerate coordinate noise.
+        def side(i):
+            x, y = (pos[i] - start)[:2]
+            return dx * y - dy * x
+        a, b = side(left), side(right)
+        eps = 1e-6 * (dx * dx + dy * dy)
+        same_side = tag in (stereo.STEREOZ, stereo.STEREOCIS)
+        if min(abs(a), abs(b)) <= eps or (a * b > 0) != same_side:
+            return f"double-bond geometry at bond {bond.GetIdx()}"
+    return None
+
+
+def _layout(mol: Chem.Mol) -> str:
+    """Keep a chemically valid reference layout or the best generic candidate."""
+    best = None
+    for name, trial in layout_candidates(mol):
+        if layout_problem(mol, trial):
+            continue
+        if name.startswith("template:"):
+            best = (0, name, trial)
+            break
         score = layout_quality(trial)["score"]
-        # switch away from the preferred engine only for a real improvement, not for
-        # a slightly more uniform bond length (CoordGen's are never exactly equal)
         if best is None or score < best[0] - LAYOUT_MIN_GAIN:
             best = (score, name, trial)
-    if best is None:  # nothing worked: RDKit's own depictor always produces something
-        rdDepictor.Compute2DCoords(mol)
-        return "rdkit"
+    if best is None:
+        trial = Chem.Mol(mol)
+        rdDepictor.Compute2DCoords(trial, forceRDKit=True)
+        problem = layout_problem(mol, trial)
+        if problem:
+            raise InvalidSmiles(f"Could not draw the specified structure faithfully ({problem})")
+        best = (0, "rdkit", trial)
     _, name, trial = best
     mol.RemoveAllConformers()
     mol.AddConformer(Chem.Conformer(trial.GetConformer()), assignId=True)
@@ -334,10 +368,6 @@ def _point_segment_distance(p, a, b) -> float:
         return math.dist(p, a)
     t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2))
     return math.dist(p, (a[0] + t * dx, a[1] + t * dy))
-
-
-def _has_nan(mol: Chem.Mol) -> bool:
-    return any(math.isnan(c) for p in mol.GetConformer().GetPositions() for c in p)
 
 
 def _drawer_with(
