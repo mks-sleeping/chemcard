@@ -128,6 +128,10 @@ def bridge_gaps(svg: str, mol: Chem.Mol, coords: list[tuple[float, float]]) -> s
         idx = bond.GetIdx()
         mask = f"bridge-gap-{idx}"
         # RDKit emits separate paths for hatches, colour splits and highlights.
+        # The mask region starts at user-space (0, 0): fine while bond ink stays at
+        # non-negative coordinates (RDKit's canvas; scheme._expand only grows the
+        # viewBox outwards for arrows). Anything that moves bonds to negative
+        # coordinates must widen this region, or the rear bond disappears entirely.
         svg = re.sub(rf"<path class='bond-{idx}(?=[ '])", f"<path mask='url(#{mask})' class='bond-{idx}", svg)
         masks.append(f"<mask id='{mask}' maskUnits='userSpaceOnUse' x='0' y='0' width='100%' height='100%'>"
                      f"<rect width='100%' height='100%' fill='white'/>"

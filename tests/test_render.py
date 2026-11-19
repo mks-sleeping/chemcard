@@ -181,8 +181,48 @@ def test_rejects_invalid_geometry_even_in_the_last_resort(monkeypatch):
 
     monkeypatch.setattr(render, "layout_candidates", wrong_template)
     monkeypatch.setattr(render.rdDepictor, "Compute2DCoords", lambda m, **kw: rdCoordGen.AddCoords(m))
-    with pytest.raises(InvalidSmiles, match="double-bond geometry"):
+    with pytest.raises(render.UndrawableStructure, match="double-bond geometry"):
         render_smiles(smi)
+
+
+def test_undrawable_is_not_reported_as_invalid_smiles(monkeypatch):
+    # the SMILES is fine; the model must not be told to "fix" it
+    from chemcard import server
+    from chemcard.chem import render
+
+    def refuse(mol):
+        raise render.UndrawableStructure("no 2D layout reproduces the specified structure (test)")
+
+    monkeypatch.setattr(render, "_layout", refuse)
+    r = server.show_structure("C1/C=C/CCCCC1")
+    assert r.is_error
+    text = r.content[0].text
+    assert "Invalid SMILES" not in text and "SMILES is valid" in text and "Do not change the structure" in text
+
+
+# Pinned E/Z cases, checked independently: RDKit re-perceives the double-bond stereo
+# from the final 2D coordinates and must get back the input. layout_problem relies on
+# RDKit's stereo atoms for E/Z bonds; these catch a change in that across RDKit versions.
+@pytest.mark.parametrize(
+    "smiles",
+    [
+        "C/C=C/C", "C/C=C\\C", "OC(=O)/C=C/C(=O)O", "OC(=O)/C=C\\C(=O)O",
+        "F/C(Cl)=C/F",                                   # priorities differ from the written neighbours
+        "Cl/C(F)=C(\\Br)I",                             # tetrasubstituted, all halogens
+        "CC/C(=C(\\c1ccccc1)c1ccc(OCCN(C)C)cc1)c1ccccc1",  # tamoxifen
+        "CC1=C(/C=C/C(C)=C/C=C/C(C)=C/C=O)C(C)(C)CCC1",  # retinal: four E bonds
+        "C1CCC/C=C/CC1", "C1CCC/C=C\\CC1", "C1CCCC/C=C/CCC1",  # E/Z in rings
+    ],
+)
+def test_final_layout_reproduces_double_bond_geometry(smiles):
+    from rdkit import Chem
+
+    from chemcard.chem.render import _layout
+
+    m = Chem.MolFromSmiles(smiles)
+    _layout(m)
+    back = Chem.MolFromMolBlock(Chem.MolToMolBlock(m))
+    assert Chem.MolToSmiles(back) == Chem.MolToSmiles(Chem.MolFromSmiles(smiles))
 
 
 def test_reference_molecule_keeps_its_substituent_coordinates():

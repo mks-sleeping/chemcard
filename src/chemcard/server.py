@@ -29,7 +29,7 @@ from chemcard import __version__, descriptions
 from chemcard.chem import mechanism
 from chemcard.chem.highlight import HighlightSpec, InvalidHighlight, describe_selection, resolve
 from chemcard.chem.lint import lint_species
-from chemcard.chem.render import InvalidSmiles, Structure, render_smiles
+from chemcard.chem.render import InvalidSmiles, Structure, UndrawableStructure, render_smiles
 from chemcard.chem.scheme import ArrowSpec, InvalidArrow, compose, resolve_arrows
 
 # The URI is a cache key for hosts: bump the version on breaking widget changes.
@@ -60,6 +60,10 @@ class Highlight(BaseModel):
 
 def _error(text: str) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=text)], is_error=True)
+
+
+def _undrawable(e: UndrawableStructure, where: str = "") -> CallToolResult:
+    return _error(f"Not drawn{' (' + where + ')' if where else ''}: {descriptions.UNDRAWABLE} Detail: {e}")
 
 
 def _draw(smiles: str, highlights: list[Highlight] | None) -> tuple[Structure, dict | None]:
@@ -93,6 +97,8 @@ def show_structure(
 ) -> CallToolResult:
     try:
         s, marks = _draw(smiles, highlights)
+    except UndrawableStructure as e:
+        return _undrawable(e)
     except InvalidSmiles as e:
         return _error(f"Invalid SMILES: {e}")
     except InvalidHighlight as e:
@@ -187,6 +193,8 @@ def show_reaction_step(
             try:
                 mine = [h for h in highlights or [] if h.side == side and h.index == i]
                 drawn[side].append(_draw(sp.smiles, mine))
+            except UndrawableStructure as e:
+                return _undrawable(e, f"{side}[{i}]")
             except InvalidSmiles as e:
                 return _error(f"Invalid SMILES in {side}[{i}]: {e}")
             except InvalidHighlight as e:
@@ -203,6 +211,8 @@ def show_reaction_step(
             reactant_scheme = compose(canonicals, resolved_arrows, [_marks_to_colors(m) for _, m in drawn["reactants"]])
         except InvalidArrow as e:
             return _error(f"Not drawn, arrow problem: {e}")
+        except UndrawableStructure as e:
+            return _undrawable(e, "reactants with arrows")
 
     arrow = " ⇌ " if reversible else " → "
     scheme = arrow.join(

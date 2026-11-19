@@ -38,6 +38,13 @@ class InvalidSmiles(ValueError):
     """
 
 
+class UndrawableStructure(ValueError):
+    """The SMILES is valid, but no layout shows it faithfully (e.g. a specified E/Z
+    geometry that no candidate reproduces). Kept apart from InvalidSmiles so the
+    model is not told to "fix" a correct structure.
+    """
+
+
 # Soft tints: highlights read like a marker pen behind the drawing, strokes stay black.
 HIGHLIGHT_RGB = {
     "red": (1.0, 0.74, 0.74),
@@ -291,7 +298,7 @@ def _layout(mol: Chem.Mol) -> str:
         rdDepictor.Compute2DCoords(trial, forceRDKit=True)
         problem = layout_problem(mol, trial)
         if problem:
-            raise InvalidSmiles(f"Could not draw the specified structure faithfully ({problem})")
+            raise UndrawableStructure(f"no 2D layout reproduces the specified structure ({problem})")
         best = (1, 0, "rdkit", trial)
     _, _, name, trial = best
     for target, source in zip(mol.GetBonds(), trial.GetBonds()):
