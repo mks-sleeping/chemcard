@@ -19,7 +19,7 @@ from rdkit.Chem import rdCoordGen, rdDepictor, rdMolDescriptors
 from rdkit.Chem.Draw import rdMolDraw2D
 
 from chemcard.chem.bridged_layout import GAP_FRACTION, bridge_candidates, bridge_gaps
-from chemcard.chem.perspective import perspective_candidates
+from chemcard.chem.perspective import fused_candidates, perspective_candidates
 
 MAX_SMILES_LEN = 500
 MAX_HEAVY_ATOMS = 150
@@ -218,11 +218,32 @@ _TEMPLATE_SCAFFOLDS = {  # most specific first
 }
 
 
-def layout_candidates(mol: Chem.Mol) -> Iterator[tuple[str, Chem.Mol]]:
-    """Yield independent drawings in preference order. Atom indices stay fixed."""
+def layout_candidates(mol: Chem.Mol, worth_trying=lambda best_rank: True) -> Iterator[tuple[str, Chem.Mol]]:
+    """Yield independent drawings in preference order. Atom indices stay fixed.
+
+    The generators run in stages, in order of the best rank (see _layout) their drawings
+    can reach. `worth_trying(rank)` is asked before each stage; _layout uses it to skip
+    stages that cannot beat what it already has (a 3D embedding for camphor, whose
+    hand-tuned view already won).
+    """
     mol = Chem.Mol(mol)
     for bond in mol.GetBonds():
         bond.ClearProp(GAP_FRACTION)
+    stages = (
+        (0, _template_candidates),
+        (0, bridge_candidates),       # hand-tuned saturated all-carbon [2.2.1]
+        (0.5, perspective_candidates),  # bicyclo[a.b.c], c ≥ 1: projected from 3D, else constructed
+        (1, _engine_candidates),
+        # bicyclo[a.b.0]: the engines already draw fused bicycles this way; this one is last
+        # so it wins only when clearly better
+        (1, fused_candidates),
+    )
+    for best_rank, stage in stages:
+        if worth_trying(best_rank):
+            yield from stage(mol)
+
+
+def _template_candidates(mol: Chem.Mol) -> Iterator[tuple[str, Chem.Mol]]:
     for name, ref, scaffold in _scaffold_templates():
         if not mol.HasSubstructMatch(scaffold):
             continue
@@ -238,9 +259,8 @@ def layout_candidates(mol: Chem.Mol) -> Iterator[tuple[str, Chem.Mol]]:
             continue
         yield f"template:{name}", trial
 
-    yield from bridge_candidates(mol)      # hand-tuned saturated all-carbon [2.2.1]
-    yield from perspective_candidates(mol)  # any bicyclo[a.b.c]: projected from 3D
 
+def _engine_candidates(mol: Chem.Mol) -> Iterator[tuple[str, Chem.Mol]]:
     for name, engine in LAYOUT_ENGINES:
         trial = Chem.Mol(mol)
         try:
@@ -299,7 +319,16 @@ def _layout(mol: Chem.Mol) -> str:
     labels alone (naloxone's 14-OH) do not disqualify the textbook view.
     """
     best = None
-    for name, trial in layout_candidates(mol):
+
+    def worth_trying(stage_rank):
+        # A later stage wins only with a lower rank, or the same rank and a score lower by
+        # LAYOUT_MIN_GAIN; scores are ≥ 0, so a rank-1 best under that gain is final.
+        if best is None:
+            return True
+        rank, score = best[:2]
+        return stage_rank < rank or (stage_rank == rank == 1 and score >= LAYOUT_MIN_GAIN)
+
+    for name, trial in layout_candidates(mol, worth_trying):
         if layout_problem(mol, trial):
             continue
         quality = layout_quality(trial)

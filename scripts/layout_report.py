@@ -38,8 +38,9 @@ from pathlib import Path
 
 from rdkit import Chem
 
+from chemcard.chem.perspective import MAX_HEAVY_ATOMS, bicyclo_systems, fused_candidates, perspective_candidates
 from chemcard.chem.render import (
-    _layout, layout_candidates, layout_problem, layout_quality, mol_from_smiles, render_smiles,
+    LAYOUT_MIN_GAIN, _layout, layout_candidates, layout_problem, layout_quality, mol_from_smiles, render_smiles,
     svg_label_overlaps,
 )
 
@@ -74,6 +75,7 @@ def evaluate(row: dict) -> dict:
     counts["render_overlap"] = len(out["render_issues"])
     out["counts"] = counts
     out["flags"] = [f for f in ALL_FLAGS if counts[f]]
+    out["bicyclo"] = bicyclo_outcome(m, out["engine"])
     out["label_contacts"] = counts["label_contacts"]
     out["score"] = counts["score"]
     if out["flags"]:
@@ -92,6 +94,83 @@ def alternatives(m: Chem.Mol, chosen: str, chosen_counts: dict) -> list[dict]:
         alts.append({"name": name, "counts": {f: c[f] for f in FLAGS}, "delta": delta})
     alts.sort(key=lambda a: (sum(a["counts"].values()), a["name"]))
     return alts
+
+
+def bicyclo_outcome(m: Chem.Mol, engine: str) -> list[dict]:
+    """For each bicyclo[a.b.c] system: were candidates generated, was one chosen, and if not, why."""
+    systems = bicyclo_systems(m)
+    out = []
+    for system in systems:
+        abc = ".".join(map(str, system["abc"]))
+        row = {"abc": abc, "candidates": [], "adopted": False, "reason": ""}
+        out.append(row)
+        if sum((o["abc"][2] == 0) == (system["abc"][2] == 0) for o in systems) > 1:
+            kind = "fused" if system["abc"][2] == 0 else "bridged"
+            row["reason"] = f"several {kind} bicyclo systems in one molecule (not attempted)"
+            continue
+        if m.GetNumHeavyAtoms() > MAX_HEAVY_ATOMS:
+            row["reason"] = f"over {MAX_HEAVY_ATOMS} heavy atoms (not attempted)"
+            continue
+        generator = fused_candidates if system["abc"][2] == 0 else perspective_candidates
+        row["candidates"] = [n for n, _ in generator(Chem.Mol(m))]
+        row["adopted"] = engine in row["candidates"]
+        if row["adopted"]:
+            continue
+        if not row["candidates"]:
+            row["reason"] = "no usable view (projection or construction)"
+        elif engine.startswith("template:"):
+            row["reason"] = "scaffold template"
+        elif engine.startswith("bridge-221"):
+            row["reason"] = "hand-tuned [2.2.1] view"
+        else:
+            best = min(layout_quality(t)["score"] for n, t in layout_candidates(Chem.Mol(m)) if n in row["candidates"])
+            chosen = layout_quality(m)["score"]
+            row["reason"] = (f"{engine} scored better" if chosen < best - 0.05 else
+                             f"{engine} kept, candidate not better by {LAYOUT_MIN_GAIN}")
+    return out
+
+
+def bicyclo_table(results: list[dict]) -> list[str]:
+    groups = defaultdict(list)
+    for r in results:
+        for row in r.get("bicyclo", []):
+            groups[row["abc"]].append((r, row))
+    if not groups:
+        return []
+
+    def key(abc):
+        a, b, c = map(int, abc.split("."))
+        return (c == 0, a + b + c, a, b)
+
+    lines = ["", "### Bicyclo[a.b.c] systems", "",
+             "Recognised = the molecule contains this ring system (bicyclo_systems). Candidates = "
+             "the bicyclo generator produced at least one drawing (projected view `bridge-a.b.c-viewK`, "
+             "constructed flat view `bicyclo-a.b.c-flatK`, fused `bicyclo-a.b.0-fused1`). Adopted = one "
+             "of them is the final drawing. Molecules by name; a category may list a compound twice.", "",
+             "| [a.b.c] | recognised | candidates | adopted | adopted (kind: molecules) | not adopted: reason (molecules) |",
+             "|---|---|---|---|---|---|"]
+    for abc in sorted(groups, key=key):
+        rows = groups[abc]
+        with_cands = [x for x in rows if x[1]["candidates"]]
+        adopted = [x for x in rows if x[1]["adopted"]]
+        kinds = defaultdict(list)
+        for r, _ in adopted:
+            kinds["projected" if r["engine"].startswith("bridge-") else
+                  "fused" if r["engine"].endswith("fused1") else "flat"].append(r["name"])
+        reasons = defaultdict(list)
+        for r, row in rows:
+            if not row["adopted"]:
+                reasons[row["reason"]].append(r["name"])
+        lines.append(
+            f"| [{abc}] | {len(rows)} | {len(with_cands)} | {len(adopted)} | "
+            + ("; ".join(f"{k}: {', '.join(v)}" for k, v in kinds.items()) or "—") + " | "
+            + ("; ".join(f"{k} ({len(v)}: {_names(v)})" for k, v in sorted(reasons.items(), key=lambda kv: -len(kv[1])))
+               or "—") + " |")
+    return lines
+
+
+def _names(names: list[str], limit: int = 6) -> str:
+    return ", ".join(names[:limit]) + (f", … +{len(names) - limit}" if len(names) > limit else "")
 
 
 def missed_clean(r: dict) -> bool:
@@ -158,6 +237,8 @@ def summarise(results: list[dict]) -> list[str]:
         lines.append(f"Render time per molecule: median {times[len(times) // 2]:.0f} ms, "
                      f"slowest {times[-1]:.0f} ms")
 
+    lines += bicyclo_table(results)
+
     flagged = sorted((r for r in results if r["flags"] or r["error"]), key=lambda r: -r["score"])
     missed = [r for r in flagged if missed_clean(r)]
     dominated = [(r, pareto_better(r)) for r in flagged if pareto_better(r)]
@@ -216,6 +297,7 @@ def main() -> None:
     args = ap.parse_args()
 
     rows = list(csv.DictReader(open(args.csv, encoding="utf-8")))
+    render_smiles("C1CCCCC1")  # load templates once, so the first sample's time is not the cold start
     results = [evaluate(r) for r in rows]
     lines = summarise(results)
     print("\n".join(lines))

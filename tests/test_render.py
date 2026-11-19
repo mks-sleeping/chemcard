@@ -203,7 +203,7 @@ def test_rejects_invalid_geometry_even_in_the_last_resort(monkeypatch):
 
     smi = "C1/C=C/CCCCC1"
 
-    def wrong_template(mol):
+    def wrong_template(mol, worth_trying=None):
         trial = Chem.Mol(mol)
         rdCoordGen.AddCoords(trial)
         yield "template:test", trial
