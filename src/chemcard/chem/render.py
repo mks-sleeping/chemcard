@@ -275,16 +275,40 @@ def layout_problem(mol: Chem.Mol, trial: Chem.Mol) -> str | None:
     return None
 
 
+def _template_crossings(name: str) -> int:
+    """Bond crossings the template's own reference drawing has (the textbook view's own)."""
+    if name not in _TEMPLATE_CROSSINGS:
+        ref = next(r for n, r, _ in _scaffold_templates() if n == name)
+        _TEMPLATE_CROSSINGS[name] = layout_quality(ref)["crossings"]
+    return _TEMPLATE_CROSSINGS[name]
+
+
+_TEMPLATE_CROSSINGS: dict[str, int] = {}
+
+
 def _layout(mol: Chem.Mol) -> str:
-    """Prefer valid reference and clear cage views, then compare geometric quality."""
+    """Prefer valid reference and clear cage views, then compare geometric quality.
+
+    A scaffold template wins outright only if it adds no bond crossing beyond the
+    one its textbook view already has. Parts of a molecule the template does not
+    cover are placed by RDKit around it and can end up across the rings
+    (buprenorphine's extra 6,14-bridge: 6 crossings vs CoordGen's 2); such a
+    template drawing then competes on score like any other candidate. Crowded
+    labels alone (naloxone's 14-OH) do not disqualify the textbook view.
+    """
     best = None
     for name, trial in layout_candidates(mol):
         if layout_problem(mol, trial):
             continue
-        if name.startswith("template:"):
-            best = (0, 0, name, trial)
-            break
         quality = layout_quality(trial)
+        if name.startswith("template:"):
+            if quality["crossings"] <= _template_crossings(name.split(":", 1)[1]):
+                best = (0, 0, name, trial)
+                break
+            rank, score = 1, quality["score"]
+            if best is None or rank < best[0] or score < best[1] - LAYOUT_MIN_GAIN:
+                best = (rank, score, name, trial)
+            continue
         # A clear, depth-cued cage keeps the conventional view. If substituents
         # collide, it competes on geometry alongside the general engines.
         clear_bridge = (name.startswith("bridge-") and quality["crossings"] == 1
