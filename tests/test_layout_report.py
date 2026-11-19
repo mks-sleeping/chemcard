@@ -44,21 +44,52 @@ def test_svg_overlap_check_is_quiet_on_ordinary_cards():
 
 # ---- 2. the candidate comparison and its honest name --------------------------------
 
-def test_pre_fix_buprenorphine_shows_the_trade_off(monkeypatch):
+def test_pre_fix_buprenorphine_chose_the_template_over_fewer_crossings(monkeypatch):
     # Before the template rule, the epoxymorphinan template won outright for buprenorphine
-    # (6 crossings) although CoordGen had 2. No candidate was fully clean, so "missed clean
-    # candidates" stays 0; the report must still show what the alternative would trade.
+    # (6 crossings) although CoordGen had 4 fewer. Only the crossing counts are asserted
+    # here: they are the same on Ubuntu and macOS, while CoordGen's clash count is not.
     from chemcard.chem import render
 
     monkeypatch.setattr(render, "_template_crossings", lambda name: 99)  # the old "template always wins"
     r = report.evaluate(ROWS["buprenorphine"])
     assert r["engine"] == "template:epoxymorphinan" and r["counts"]["crossing"] == 6
     coordgen = next(a for a in r["alternatives"] if a["name"] == "coordgen")
-    assert coordgen["delta"]["crossing"] == -4 and coordgen["delta"]["clash"] == 1
-    assert not report.missed_clean(r)
+    assert coordgen["delta"]["crossing"] == -4
+
+
+def flagged(name, counts, alternatives):
+    """A flagged result with fixed candidate data, as evaluate() would return it."""
+    alts = []
+    for alt, alt_counts in alternatives.items():
+        alt_counts = {f: alt_counts.get(f, 0) for f in report.FLAGS}
+        alts.append({"name": alt, "counts": alt_counts, "delta": {f: alt_counts[f] - counts.get(f, 0) for f in report.FLAGS}})
+    counts = {f: counts.get(f, 0) for f in report.FLAGS} | {"render_overlap": 0}
+    return {"name": name, "cid": name, "category": "x", "heavy_atoms": "30", "engine": "template:t", "error": "",
+            "flags": [f for f in report.FLAGS if counts[f]], "label_contacts": 0, "ms": 1.0, "score": 10.0,
+            "counts": counts, "render_issues": [], "alternatives": alts}
+
+
+def test_trade_off_text_and_count_from_fixed_candidates():
+    # the buprenorphine situation, with fixed numbers: CoordGen trades 4 crossings for 1 clash
+    r = flagged("bup", {"crossing": 6}, {"coordgen": {"crossing": 2, "clash": 1}})
+    assert not report.missed_clean(r) and report.pareto_better(r) == [] and report.trade_offs(r) == ["coordgen"]
     text = "\n".join(report.summarise([r]))
     assert "coordgen: crossing −4, clash +1" in text
     assert "Missed fully clean candidates" in text and "Selection mistakes" not in text
+    assert "improves some count at the cost of another: **1**" in text
+
+
+def test_trade_offs_are_judged_per_candidate():
+    # one candidate better on one count and worse on none, another better on one and worse on
+    # another: the molecule belongs to both lists
+    both = flagged("both", {"crossing": 2, "clash": 1},
+                   {"x": {"crossing": 1, "clash": 1}, "y": {"crossing": 0, "clash": 2}})
+    assert report.pareto_better(both) == ["x"] and report.trade_offs(both) == ["y"]
+    # only a Pareto-better candidate: no trade-off (the old rule counted any improvement)
+    pareto_only = flagged("pareto", {"crossing": 2}, {"x": {"crossing": 1}})
+    assert report.pareto_better(pareto_only) == ["x"] and report.trade_offs(pareto_only) == []
+    text = "\n".join(report.summarise([both, pareto_only]))
+    assert "Pareto-better candidate (no count worse, one better): **2**" in text
     assert "improves some count at the cost of another: **1**" in text
 
 

@@ -40,7 +40,9 @@ claims only what those counts support:
   existed but was not chosen;
 - **Pareto-better candidates** — another candidate is no worse on any layout count and
   better on one;
-- **trade-offs** — another candidate improves some count at the cost of another.
+- **trade-offs** — one candidate is better than the chosen drawing on some count and
+  worse on another. Candidates are judged one at a time, so a molecule can have both a
+  Pareto-better candidate and a trade-off.
 
 None of these says a choice was right or wrong. "Zero missed clean candidates" only
 means no flawless alternative was overlooked: before the template fix, buprenorphine

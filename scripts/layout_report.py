@@ -105,6 +105,12 @@ def pareto_better(r: dict) -> list[str]:
             if all(v <= 0 for v in a["delta"].values()) and any(v < 0 for v in a["delta"].values())]
 
 
+def trade_offs(r: dict) -> list[str]:
+    """Candidates that are better than the chosen drawing on one count and worse on another."""
+    return [a["name"] for a in r["alternatives"]
+            if any(v < 0 for v in a["delta"].values()) and any(v > 0 for v in a["delta"].values())]
+
+
 def trade_text(a: dict) -> str:
     parts = [f"{f} {'+' if v > 0 else '−'}{abs(v)}" for f, v in a["delta"].items() if v]
     return f"{a['name']}: " + (", ".join(parts) if parts else "same counts")
@@ -161,7 +167,7 @@ def summarise(results: list[dict]) -> list[str]:
     flagged = sorted((r for r in results if r["flags"] or r["error"]), key=lambda r: -r["score"])
     missed = [r for r in flagged if missed_clean(r)]
     dominated = [(r, pareto_better(r)) for r in flagged if pareto_better(r)]
-    trades = [r for r in flagged if any(any(v < 0 for v in a["delta"].values()) for a in r["alternatives"])]
+    trades = [r for r in flagged if trade_offs(r)]  # a molecule may also have a Pareto-better candidate
     lines += [
         "", "### What the candidate comparison can and cannot say", "",
         "Only the four layout counts are compared (render overlaps need each candidate drawn).",
@@ -171,7 +177,8 @@ def summarise(results: list[dict]) -> list[str]:
         f"- Choices with a Pareto-better candidate (no count worse, one better): **{len(dominated)}**"
         + (" — " + ", ".join(f"{r['name']} ({', '.join(p)})" for r, p in dominated) if dominated else ""),
         f"- Choices where another candidate improves some count at the cost of another: **{len(trades)}**; "
-        "whether the trade is worth it is a judgement the counts cannot make (see the table and --sheet).",
+        "whether the trade is worth it is a judgement the counts cannot make (see the table and --sheet). "
+        "Each candidate is judged on its own, so one molecule can be in this list and the one above.",
     ]
     lines += ["", "### Flagged molecules (worst first)", "",
               "| molecule | category | heavy atoms | layout | problems | other candidates (Δ vs chosen) |",
