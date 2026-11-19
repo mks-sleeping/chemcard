@@ -102,7 +102,7 @@ def bicyclo_outcome(m: Chem.Mol, engine: str) -> list[dict]:
     out = []
     for system in systems:
         abc = ".".join(map(str, system["abc"]))
-        row = {"abc": abc, "candidates": [], "adopted": False, "reason": ""}
+        row = {"abc": abc, "candidates": [], "rejected": {}, "adopted": False, "reason": ""}
         out.append(row)
         if sum((o["abc"][2] == 0) == (system["abc"][2] == 0) for o in systems) > 1:
             kind = "fused" if system["abc"][2] == 0 else "bridged"
@@ -112,18 +112,28 @@ def bicyclo_outcome(m: Chem.Mol, engine: str) -> list[dict]:
             row["reason"] = f"over {MAX_HEAVY_ATOMS} heavy atoms (not attempted)"
             continue
         generator = fused_candidates if system["abc"][2] == 0 else perspective_candidates
-        row["candidates"] = [n for n, _ in generator(Chem.Mol(m))]
-        row["adopted"] = engine in row["candidates"]
+        valid = {}
+        for name, trial in generator(Chem.Mol(m)):
+            problem = layout_problem(m, trial)  # the same check the layout chooser applies first
+            if problem:
+                row["rejected"][name] = problem
+            else:
+                valid[name] = trial
+        row["candidates"] = list(valid) + list(row["rejected"])
+        row["adopted"] = engine in valid
         if row["adopted"]:
             continue
         if not row["candidates"]:
             row["reason"] = "no usable view (projection or construction)"
+        elif not valid:
+            # "double-bond geometry at bond 3" → "double-bond geometry", so molecules group by reason
+            row["reason"] = "rejected: " + "; ".join(sorted({p.split(" at ")[0] for p in row["rejected"].values()}))
         elif engine.startswith("template:"):
             row["reason"] = "scaffold template"
         elif engine.startswith("bridge-221"):
             row["reason"] = "hand-tuned [2.2.1] view"
         else:
-            best = min(layout_quality(t)["score"] for n, t in layout_candidates(Chem.Mol(m)) if n in row["candidates"])
+            best = min(layout_quality(t)["score"] for t in valid.values())
             chosen = layout_quality(m)["score"]
             row["reason"] = (f"{engine} scored better" if chosen < best - 0.05 else
                              f"{engine} kept, candidate not better by {LAYOUT_MIN_GAIN}")

@@ -165,6 +165,18 @@ def test_bicycles_without_a_usable_projection_get_a_constructed_view(smiles, abc
     assert not re.search(r"<path class='atom-\d+'", card.svg)
 
 
+def test_every_bridge_is_tried_as_the_inner_one():
+    # [1.1.1] with a methyl on one bridge and a carbonyl on another: the bridges are equally
+    # long, but only some of them can go inside without the substituent landing on a bond.
+    m = Chem.MolFromSmiles("CC1C2CC1C2=O")
+    cands = list(perspective_candidates(m))
+    assert cands
+    for _, trial in cands:
+        q = layout_quality(trial)
+        assert q["crossings"] == 0 and q["clashes"] == 0 and q["on_bond"] == 0
+    assert _layout(Chem.MolFromSmiles("CC1C2CC1C2=O")).startswith("bicyclo-1.1.1-flat")
+
+
 def test_existing_projection_successes_are_kept():
     for smiles, prefix in [("C1CCC2CCCC(C1)CC2", "bridge-4.3.2-view"), ("C1CN2CCN1CC2", "bridge-2.2.2-view"),
                            ("CN1C2CCC1CC(=O)C2", "bridge-3.2.1-view"), ("C1=CC2CCC1C2", "bridge-2.2.1-view"),

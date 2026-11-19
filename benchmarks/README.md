@@ -98,13 +98,20 @@ Adopted drawings (each final card looked at):
   system), eucalyptol = 1,8-cineole (busier than CoordGen's drawing — the methyl on the
   bridgehead sits near the O — but no counted defect); [2.2.1] norbornene,
   norbornadiene, 7-oxanorbornane, epibatidine; [3.2.1] atropine
-- constructed flat view, 4: cocaine, tropinone ([3.2.1]), anatoxin-a ([4.2.1]),
-  fenchone ([2.2.1]) — their projections are crowded once substituents are placed; the
-  flat views look like RDKit's template drawing with the N-methyl kept out of the ring
+- constructed flat view, 6: cocaine, tropinone ([3.2.1]), anatoxin-a ([4.2.1]),
+  fenchone ([2.2.1]), α-pinene, β-pinene ([3.1.1]) — their projections are crowded
+  once substituents are placed; the flat views look like RDKit's template drawing (the
+  tropanes with the N-methyl kept out of the ring). Each of the three bridges is tried
+  as the inner one, even when two are equally long: the pinenes only got a clean flat
+  view once the gem-dimethyl bridge could go outside. (β-pinene was wrongly listed as
+  projected in an earlier version of this note.)
 - not adopted: camphor, borneol, isoborneol, norbornane (hand-tuned [2.2.1] view first);
-  α-/β-pinene ([3.1.1]: rdkit-templates scores better; β-pinene was wrongly listed as
-  projected in the previous version of this note); every fused system (the engines
-  already draw them this way); thujone ([3.1.0]: no usable view)
+  every fused system (the engines already draw them this way); thujone ([3.1.0]: no
+  usable view)
+
+The per-[a.b.c] table applies `layout_problem` to every candidate first, as the layout
+chooser does, and reports a rejected one as such ("rejected: double-bond geometry" for
+the flat fused drawing of trans-bicyclo[6.4.0]dodec-2-ene) instead of comparing scores.
 
 Outside the benchmark (tests): Cl-bicyclo[2.2.2]octane keeps its third-ranked projected
 view (the first two put the Cl on a bond once placed); [1.1.1], [3.3.3], [4.4.4] get

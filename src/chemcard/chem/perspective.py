@@ -362,12 +362,19 @@ def _flat_views(core):
     crosses inside as a zigzag chain, bowed toward one side, its bonds shorter or longer
     as needed. Every choice of inner path, head distance, bow and zigzag is scored like
     a projection, except that no crossing is allowed.
+
+    Each of the three paths is tried as the inner one, even when two have the same
+    length: a carbonyl or a methyl on one of them can need the outside. The core score
+    cannot see substituents, so the views are offered round-robin over the inner-path
+    choices (best core score first within each), and the placement step judges them
+    on the whole molecule.
     """
     h1, h2 = core["heads"]
     bridges = core["bridges"]
     bonds = [(p[k], p[k + 1], None) for p in ([h1] + br + [h2] for br in bridges) for k in range(len(p) - 1)]
-    scored = []
-    for inner in sorted({len(br): i for i, br in enumerate(bridges)}.values()):
+    groups = []
+    for inner in range(3):
+        scored = []
         up, down = sorted((i for i in range(3) if i != inner), key=lambda i: -len(bridges[i]))
         for f in (0.5, 0.65, 0.8):
             span = f * (len(bridges[down]) + 1)
@@ -384,9 +391,12 @@ def _flat_views(core):
                         continue
                     score = result[0] + max(0.0, 70 - result[2]) / 20  # penalise needle-sharp angles
                     scored.append((score, coords))
-    scored.sort(key=lambda s: s[0])
+        if scored:
+            groups.append(sorted(scored, key=lambda s: s[0]))
+    groups.sort(key=lambda g: g[0][0])
+    ranked = [g[rank] for rank in range(max(map(len, groups), default=0)) for g in groups if rank < len(g)]
     seen = []
-    for _, coords in scored:
+    for _, coords in ranked:
         unit = float(np.median([math.dist(coords[a], coords[b]) for a, b, _ in bonds]))
         coords = _scaled({i: (x / unit, y / unit) for i, (x, y) in coords.items()})
         if any(_same_drawing(coords, prev) for prev in seen):
