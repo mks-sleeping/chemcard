@@ -429,6 +429,101 @@ def layout_quality(mol: Chem.Mol) -> dict:
             "inside": inside, "label_contacts": label_contacts, "spread": round(spread, 4)}
 
 
+def svg_label_overlaps(svg: str) -> list[dict]:
+    """Overlaps visible in the final drawing, read from RDKit's SVG.
+
+    `layout_quality` scores the molecule's coordinates, but RDKit adds atoms while
+    drawing (an explicit H on a stereocentre) and sizes labels itself, so some
+    collisions exist only in the picture: in artemisinin's card a drawing-time H sat
+    3.7 px from the peroxide O. This reads the glyph paths (class='atom-N') and bond
+    paths (class='bond-K atom-A atom-B') and reports
+      - "label/label": two atoms' labels overlap;
+      - "label/bond": a bond not attached to the atom runs through its label.
+    Boxes are shrunk by LABEL_SLACK px so labels merely touching are not reported.
+    """
+    boxes = _svg_label_boxes(svg)
+    found = []
+    items = sorted(boxes.items())
+    for k, (a, ba) in enumerate(items):
+        for b, bb in items[k + 1:]:
+            if _boxes_overlap(_shrink(ba), _shrink(bb)):
+                ca, cb = _centre(ba), _centre(bb)
+                found.append({"kind": "label/label", "atoms": (a, b), "distance": round(math.dist(ca, cb), 2)})
+    seen = set()  # a hashed wedge or a split-colour bond is several paths: report it once
+    for atoms, segments in _svg_bond_segments(svg):
+        for a, box in items:
+            key = (a, tuple(sorted(atoms)))
+            if a in atoms or key in seen:
+                continue
+            if any(_segment_hits_box(p, q, _shrink(box)) for p, q in segments):
+                seen.add(key)
+                found.append({"kind": "label/bond", "atoms": (a,), "bond_atoms": key[1]})
+    return found
+
+
+LABEL_SLACK = 1.0  # px
+
+
+def _svg_label_boxes(svg: str) -> dict[int, tuple[float, float, float, float]]:
+    boxes: dict[int, tuple[float, float, float, float]] = {}
+    for m in re.finditer(r"<path class='atom-(\d+)' d='([^']*)'", svg):
+        nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", m.group(2))]
+        xs, ys = nums[0::2], nums[1::2]
+        if not xs:
+            continue
+        i = int(m.group(1))
+        box = (min(xs), min(ys), max(xs), max(ys))
+        if i in boxes:  # a label drawn as several glyph paths ("OH", "NH2")
+            o = boxes[i]
+            box = (min(o[0], box[0]), min(o[1], box[1]), max(o[2], box[2]), max(o[3], box[3]))
+        boxes[i] = box
+    return boxes
+
+
+def _svg_bond_segments(svg: str) -> list[tuple[set[int], list]]:
+    out = []
+    for m in re.finditer(r"<path (?:mask='[^']*' )?class='bond-\d+((?: atom-\d+)+)' d='([^']*)'", svg):
+        atoms = {int(x) for x in re.findall(r"atom-(\d+)", m.group(1))}
+        nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", m.group(2))]
+        pts = list(zip(nums[0::2], nums[1::2]))
+        out.append((atoms, list(zip(pts, pts[1:]))))
+    return out
+
+
+def _shrink(box):
+    x0, y0, x1, y1 = box
+    return (x0 + LABEL_SLACK, y0 + LABEL_SLACK, x1 - LABEL_SLACK, y1 - LABEL_SLACK)
+
+
+def _centre(box):
+    return ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+
+
+def _boxes_overlap(a, b) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _segment_hits_box(p, q, box) -> bool:
+    """Liang–Barsky clip: does segment p–q pass through the axis-aligned box?"""
+    x0, y0, x1, y1 = box
+    if x0 >= x1 or y0 >= y1:
+        return False
+    dx, dy = q[0] - p[0], q[1] - p[1]
+    t0, t1 = 0.0, 1.0
+    for d, lo, hi, s in ((dx, x0, x1, p[0]), (dy, y0, y1, p[1])):
+        if d == 0:
+            if s < lo or s > hi:
+                return False
+            continue
+        ta, tb = (lo - s) / d, (hi - s) / d
+        if ta > tb:
+            ta, tb = tb, ta
+        t0, t1 = max(t0, ta), min(t1, tb)
+        if t0 > t1:
+            return False
+    return True
+
+
 def _inside_polygon(p, poly) -> bool:
     x, y = p
     inside = False
