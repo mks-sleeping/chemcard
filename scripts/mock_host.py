@@ -25,11 +25,13 @@ import anyio
 
 from chemcard.server import (
     CARD_URI,
+    Arrow,
     Highlight,
     Species,
     StepHighlight,
     describe_selection_tool,
     mcp,
+    render_reactant_scheme,
     render_structure_svg,
     show_reaction_step,
     show_structure,
@@ -62,6 +64,26 @@ SAMPLES = [
      {"reactants": [S(smiles="CN1C2CCC1C(C(=O)O)C(=O)C2C(=O)O", label="托品酮-2,4-二羧酸")],
       "products": [S(smiles="CN1C2CCC1CC(=O)C2", label="托品酮"), S(smiles="O=C=O"), S(smiles="O=C=O")],
       "conditions": "Δ", "caption": "第 6 步：两次脱羧"}, "normal"),
+    ("SN2：OH⁻ 的孤对电子从背面进攻碳，C–Br 键的电子流向 Br（弯箭头）：", "show_reaction_step",
+     {"reactants": [S(smiles="[OH-:1]", label="氢氧根"), S(smiles="[CH3:2][Br:3]", label="溴甲烷")],
+      "products": [S(smiles="CO", label="甲醇"), S(smiles="[Br-]")],
+      "caption": "SN2：一步协同", "arrows": [Arrow(start="lp:1", end="bond:1-2"), Arrow(start="bond:2-3", end="atom:3")]},
+     "normal"),
+    ("氰根加成到酮羰基（宿主丢弃 _meta，卡片自己取图）：", "show_reaction_step",
+     {"reactants": [S(smiles="N#[C-:1]", label="氰根"), S(smiles="C[C:2](C)=[O:3]", label="丙酮")],
+      "products": [S(smiles="CC(C)(C#N)[O-]", label="氰醇负离子")],
+      "caption": "亲核加成", "highlights": [StepHighlight(side="reactants", index=2, atoms=[2], color="red")],
+      "arrows": [Arrow(start="lp:1", end="atom:2"), Arrow(start="bond:2-3", end="atom:3")]}, "strip_meta"),
+    ("E2：碱夺取 β-H，C–H 电子形成 C=C，Br⁻ 离去：", "show_reaction_step",
+     {"reactants": [S(smiles="CC[O-:1]", label="乙氧负离子"), S(smiles="C[CH:2]([H:5])[CH2:3][Br:4]", label="1-溴丙烷")],
+      "products": [S(smiles="CC=C"), S(smiles="CCO"), S(smiles="[Br-]")],
+      "caption": "E2", "arrows": [Arrow(start="lp:1", end="atom:5"), Arrow(start="bond:2-5", end="bond:2-3"),
+                                  Arrow(start="bond:3-4", end="atom:4")]}, "normal"),
+    ("自由基均裂：两个单电子箭头（鱼钩）：", "show_reaction_step",
+     {"reactants": [S(smiles="[Br:1][Br:2]")], "products": [S(smiles="[Br]"), S(smiles="[Br]")],
+      "conditions": "hν", "radical": True, "caption": "均裂",
+      "arrows": [Arrow(start="bond:1-2", end="atom:1", style="half"), Arrow(start="bond:1-2", end="atom:2", style="half")]},
+     "normal"),
     ("错误的 SMILES 不显示卡片，模型会收到错误信息后重试：", "show_structure", {"smiles": "C1CC"}, "normal"),
     ("【宿主不发结果】4 秒后卡片应显示调试信息：", "show_structure", {"smiles": "CCO", "label": "乙醇"}, "silent"),
 ]
@@ -71,12 +93,11 @@ DEMO = [
     ("阿司匹林会水解的是酯基（红色）；同一分子里的羧基（蓝色）本身不会水解。", "show_structure",
      {"smiles": "CC(=O)Oc1ccccc1C(=O)O", "label": "阿司匹林",
       "highlights": [H(smarts="[C;$(C(=O)Oc)](=O)O", color="red"), H(smarts="C(=O)[OX2H1]", color="blue")]}, "normal"),
-    ("水分子进攻酯羰基碳（红），酰基与酚氧之间的键断开，生成水杨酸和乙酸：", "show_reaction_step",
-     {"reactants": [S(smiles="CC(=O)Oc1ccccc1C(=O)O", label="阿司匹林"), S(smiles="[OH2:1]")],
-      "products": [S(smiles="OC(=O)c1ccccc1O", label="水杨酸"), S(smiles="CC(=O)O", label="乙酸")],
-      "conditions": "H⁺ 或 OH⁻", "caption": "酯键水解",
-      "highlights": [StepHighlight(side="reactants", index=1, smarts="[C;$(C(=O)Oc)](=O)O", color="red"),
-                     StepHighlight(side="reactants", index=2, atoms=[1], color="blue")]}, "normal"),
+    ("SN2 一步完成：OH⁻ 的孤对电子从背面进攻碳，C–Br 键的电子流向 Br：", "show_reaction_step",
+     {"reactants": [S(smiles="[OH-:1]", label="氢氧根"), S(smiles="[CH3:2][Br:3]", label="溴甲烷")],
+      "products": [S(smiles="CO", label="甲醇"), S(smiles="[Br-]")], "caption": "SN2",
+      "highlights": [StepHighlight(side="reactants", index=2, atoms=[2], color="red")],
+      "arrows": [Arrow(start="lp:1", end="bond:1-2"), Arrow(start="bond:2-3", end="atom:3")]}, "normal"),
     ("桥环骨架也能画清楚，例如托品酮合成的最后一步：", "show_reaction_step",
      {"reactants": [S(smiles="CN1C2CCC1C(C(=O)O)C(=O)C2C(=O)O", label="托品酮-2,4-二羧酸")],
       "products": [S(smiles="CN1C2CCC1CC(=O)C2", label="托品酮"), S(smiles="O=C=O"), S(smiles="O=C=O")],
@@ -84,7 +105,11 @@ DEMO = [
 ]
 
 DRAW_TOOLS = {"show_structure": show_structure, "show_reaction_step": show_reaction_step}
-APP_TOOLS = {"render_structure_svg": render_structure_svg, "describe_selection": describe_selection_tool}
+APP_TOOLS = {
+    "render_structure_svg": render_structure_svg,
+    "describe_selection": describe_selection_tool,
+    "render_reactant_scheme": render_reactant_scheme,
+}
 
 PAGE = """<!doctype html>
 <html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">

@@ -73,3 +73,79 @@ def test_bridged_bicyclics_render(smiles):
     s = render_smiles(smiles)
     assert s.width > 0 and s.height > 0
     assert render_smiles(smiles).svg == s.svg
+
+
+# ---- scaffold templates (layout engines draw morphinans badly) ----------------
+
+@pytest.mark.parametrize(
+    "smiles, template",
+    [
+        ("COc1ccc2c(c1)[C@]13CCCC[C@@H]1[C@H](C2)N(C)CC3", "morphinan"),              # dextromethorphan
+        ("CN1CC[C@]23c4c5ccc(O)c4O[C@H]2[C@@H](O)C=C[C@H]3[C@H]1C5", "epoxymorphinan"),  # morphine
+        ("O=C1CC[C@@]2(O)[C@H]3Cc4ccc(O)c5O[C@@H]1[C@]2(CCN3CC=C)c45", "epoxymorphinan"),  # naloxone
+    ],
+)
+def test_morphinans_use_textbook_template(smiles, template):
+    # CoordGen/RDKit put the N-methyl across the rings (2026-11-19 screenshot); PubChem-derived templates fix it
+    from rdkit import Chem
+
+    from chemcard.chem.render import _layout
+
+    m = Chem.MolFromSmiles(smiles)
+    assert _layout(m) == f"template:{template}"
+    assert render_smiles(smiles).width > 0
+
+
+def test_ordinary_molecules_keep_coordgen():
+    from rdkit import Chem
+
+    from chemcard.chem.render import _layout
+
+    for smi in (CAFFEINE, "CC1(C)S[C@@H]2[C@H](NC(=O)Cc3ccccc3)C(=O)N2[C@H]1C(=O)O", "C1COCCOCCOCCOCCOCCO1"):
+        assert _layout(Chem.MolFromSmiles(smi)) == "coordgen"
+
+
+@pytest.mark.parametrize("smiles", ["CN1C2CCC1CC(=O)C2", "COC(=O)[C@H]1[C@@H](OC(=O)c2ccccc2)C[C@@H]2CC[C@H]1N2C"])
+def test_substituent_drawn_into_a_ring_loses(smiles):
+    # CoordGen draws the N-methyl of tropinone/cocaine inside a ring; the score must notice and switch
+    from rdkit import Chem
+    from rdkit.Chem import rdCoordGen
+
+    from chemcard.chem.render import _layout, layout_quality
+
+    m = Chem.MolFromSmiles(smiles)
+    rdCoordGen.AddCoords(m)
+    assert layout_quality(m)["inside"] >= 1
+    chosen = Chem.MolFromSmiles(smiles)
+    assert _layout(chosen) == "rdkit-templates"
+    assert layout_quality(chosen)["inside"] == 0
+
+
+def test_chosen_layout_is_never_clearly_worse_than_an_alternative():
+    from rdkit import Chem
+
+    from chemcard.chem.render import LAYOUT_ENGINES, LAYOUT_MIN_GAIN, _layout, layout_quality
+
+    for smi in ("CC1(C)C2CCC1(C)C(=O)C2", "C1C2CC3CC1CC(C2)C3", "Clc1ccc(cn1)[C@@H]1C[C@H]2CC[C@@H]1N2", CAFFEINE):
+        chosen = Chem.MolFromSmiles(smi)
+        _layout(chosen)
+        alternatives = []
+        for _, engine in LAYOUT_ENGINES:
+            m = Chem.MolFromSmiles(smi)
+            engine(m)
+            alternatives.append(layout_quality(m)["score"])
+        assert layout_quality(chosen)["score"] <= min(alternatives) + LAYOUT_MIN_GAIN
+
+
+def test_quality_counts_crossings_and_clashes():
+    from rdkit import Chem
+    from rdkit.Geometry import Point3D
+
+    from chemcard.chem.render import layout_quality
+
+    m = Chem.MolFromSmiles("CC.CC")  # two bonds drawn as an X
+    conf = Chem.Conformer(4)
+    for i, (x, y) in enumerate([(0, 0), (1, 1), (0, 1), (1, 0)]):
+        conf.SetAtomPosition(i, Point3D(x, y, 0))
+    m.AddConformer(conf)
+    assert layout_quality(m)["crossings"] == 1

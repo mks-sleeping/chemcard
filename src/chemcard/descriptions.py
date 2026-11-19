@@ -42,7 +42,7 @@ SHOW_REACTION_STEP = (
     "directly below it in 1–4 sentences, then call it for step 2, and so on. Never draw all steps "
     "first and explain them afterwards. A step may have 1–4 species per side. Small byproducts "
     "(H2O, H+) can go in the products or in `conditions`. Mark the reacting centres with `highlights` "
-    "(e.g. the attacking atom in blue, the electrophilic carbon or the bond that breaks in red). Write charged atoms with their H explicitly "
+    "(e.g. the attacking atom in blue, the electrophilic carbon or the bond that breaks in red). For mechanisms, show the electron flow with `arrows` (curved arrows; atom-map numbers). Write charged atoms with their H explicitly "
     "([NH+], [OH2+]); a bracket atom without H becomes a radical and the step is refused. The result "
     "reports imbalance and unusual species (methyl/primary cations, strong base in acid); if one "
     "reveals a mistake, fix the step and call again."
@@ -116,5 +116,19 @@ STEP_HIGHLIGHTS_PARAM = (
 STEP_HIGHLIGHT_SIDE_PARAM = "Which side the highlighted species is on."
 
 STEP_HIGHLIGHT_INDEX_PARAM = "1-based position of the species on that side (1 = first reactant/product)."
+
+ARROWS_PARAM = (
+    "Optional curved (electron-pushing) arrows drawn on the reactants. Number the atoms involved "
+    "in the reactant SMILES with atom-map numbers, unique across the step, e.g. reactants "
+    "[OH-:1] and [CH3:2][Br:3], then arrows [{\"start\": \"lp:1\", \"end\": \"bond:1-2\"}, "
+    "{\"start\": \"bond:2-3\", \"end\": \"atom:3\"}] for SN2. To draw a proton being taken, "
+    "write that H explicitly ([H:5]). Use style 'half' for one-electron (radical) arrows."
+)
+
+ARROW_START_PARAM = "Where the electrons come from: 'lp:N' (lone pair on atom N) or 'bond:N-M' (an existing bond)."
+
+ARROW_END_PARAM = "Where they go: 'atom:N', or 'bond:N-M' for a bond being formed (or a π bond being made)."
+
+ARROW_STYLE_PARAM = "'full' for an electron pair (normal), 'half' for a single electron (fishhook)."
 
 RADICAL_PARAM = "True only for radical chemistry (homolysis, radical chain steps); allows species with unpaired electrons."

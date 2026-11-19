@@ -30,9 +30,10 @@ from chemcard.chem import mechanism
 from chemcard.chem.highlight import HighlightSpec, InvalidHighlight, describe_selection, resolve
 from chemcard.chem.lint import lint_species
 from chemcard.chem.render import InvalidSmiles, Structure, render_smiles
+from chemcard.chem.scheme import ArrowSpec, InvalidArrow, compose, resolve_arrows
 
 # The URI is a cache key for hosts: bump the version on breaking widget changes.
-CARD_URI = "ui://chemcard/card-v5.html"
+CARD_URI = "ui://chemcard/card-v6.html"
 MAX_SPECIES_PER_SIDE = 4
 
 READ_ONLY = ToolAnnotations(
@@ -126,6 +127,22 @@ class StepHighlight(Highlight):
     index: int = Field(ge=1, le=MAX_SPECIES_PER_SIDE, description=descriptions.STEP_HIGHLIGHT_INDEX_PARAM)
 
 
+class Arrow(BaseModel):
+    start: str = Field(description=descriptions.ARROW_START_PARAM)
+    end: str = Field(description=descriptions.ARROW_END_PARAM)
+    style: Literal["full", "half"] = Field(default="full", description=descriptions.ARROW_STYLE_PARAM)
+
+
+def _marks_to_colors(marks: dict | None) -> tuple[dict[int, str], dict[int, str]]:
+    m = marks or {}
+    return ({int(i): c for i, c in (m.get("atoms") or {}).items()},
+            {int(i): c for i, c in (m.get("bonds") or {}).items()})
+
+
+def _scheme_figure(sc) -> dict:
+    return {"svg": sc.svg, "width": sc.width, "height": sc.height, "atoms": sc.atoms, "species": sc.species}
+
+
 @apps.tool(
     resource_uri=CARD_URI,
     name="draw_reaction_step",
@@ -141,6 +158,7 @@ def show_reaction_step(
     reversible: Annotated[bool, Field(description=descriptions.REVERSIBLE_PARAM)] = False,
     radical: Annotated[bool, Field(description=descriptions.RADICAL_PARAM)] = False,
     highlights: Annotated[list[StepHighlight] | None, Field(description=descriptions.STEP_HIGHLIGHTS_PARAM)] = None,
+    arrows: Annotated[list[Arrow] | None, Field(description=descriptions.ARROWS_PARAM)] = None,
 ) -> CallToolResult:
     sides = {"reactants": reactants, "products": products}
     for h in highlights or []:
@@ -174,12 +192,26 @@ def show_reaction_step(
             except InvalidHighlight as e:
                 return _error(f"Not drawn, highlight problem in {side}[{i}]: {e}")
 
+    resolved_arrows: list[dict] = []
+    reactant_scheme = None
+    if arrows:
+        try:
+            canonicals, resolved_arrows = resolve_arrows(
+                [sp.smiles for sp in reactants],
+                [ArrowSpec(src=a.start, dst=a.end, style=a.style) for a in arrows],
+            )
+            reactant_scheme = compose(canonicals, resolved_arrows, [_marks_to_colors(m) for _, m in drawn["reactants"]])
+        except InvalidArrow as e:
+            return _error(f"Not drawn, arrow problem: {e}")
+
     arrow = " ⇌ " if reversible else " → "
     scheme = arrow.join(
         " + ".join(sp.label or st.formula for sp, (st, _) in zip(species, drawn[side]))
         for side, species in (("reactants", reactants), ("products", products))
     )
     text = f"Displayed step: {scheme}."
+    if arrows:
+        text += " Curved arrows: " + "; ".join(f"{a.start} → {a.end}" + (" (half)" if a.style == "half" else "") for a in arrows) + "."
     if warnings:
         text += "\nCheck (drawn anyway; fix and redraw if it is a mistake):\n" + "\n".join(warnings)
     if not highlights:
@@ -205,9 +237,34 @@ def show_reaction_step(
             "reactants": summary(reactants, drawn["reactants"]),
             "products": summary(products, drawn["products"]),
             "warnings": warnings,
+            **({"arrows": resolved_arrows} if resolved_arrows else {}),
         },
-        meta={side: [_figure(st) for st, _ in drawn[side]] for side in ("reactants", "products")},
+        meta={
+            **{side: [_figure(st) for st, _ in drawn[side]] for side in ("reactants", "products")},
+            **({"reactant_scheme": _scheme_figure(reactant_scheme)} if reactant_scheme else {}),
+        },
     )
+
+
+@apps.tool(
+    resource_uri=CARD_URI,
+    visibility=["app"],
+    name="render_reactant_scheme",
+    title="Render reactants with arrows",
+    description="Card-internal: redraw a step's reactants with curved arrows when _meta was not delivered.",
+    annotations=READ_ONLY,
+)
+def render_reactant_scheme(reactants: list[dict], arrows: list[dict]) -> CallToolResult:
+    """`reactants`: [{"smiles": canonical, "highlight": {...} | None}]; `arrows`: resolved, from structuredContent."""
+    try:
+        sc = compose(
+            [r["smiles"] for r in reactants],
+            arrows,
+            [_marks_to_colors(r.get("highlight")) for r in reactants],
+        )
+    except (InvalidSmiles, InvalidArrow, KeyError, IndexError, TypeError, ValueError) as e:
+        return _error(str(e))
+    return CallToolResult(content=[TextContent(type="text", text="ok")], structured_content=_scheme_figure(sc))
 
 
 @apps.tool(

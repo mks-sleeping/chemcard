@@ -6,12 +6,13 @@
 
 ![chemcard 效果：讲解与结构图交替，高亮正在讲的基团](docs/images/demo.png)
 
-> **早期实验项目（v0.3）。** 已在 Claude 桌面版中实测；ChatGPT 接入方式已按文档实现，但尚未实测。
+> **早期实验项目（v0.4）。** 已在 Claude 桌面版中实测；ChatGPT 接入方式已按文档实现，但尚未实测。
 
 ## 能做什么
 
-- **画分子**（`draw_molecule`）：模型给 SMILES，服务器用 RDKit 画图。键长固定，小分子画得小，大分子不会被压缩；桥环（如托品烷）使用环系模板，画法清晰。
+- **画分子**（`draw_molecule`）：模型给 SMILES，服务器用 RDKit 画图。键长固定，小分子画得小，大分子不会被压缩；桥环（如托品烷）使用环系模板，吗啡喃类（右美沙芬、吗啡、可待因、纳洛酮…）使用教科书坐标模板，画法清晰。
 - **画反应步骤**（`draw_reaction_step`）：一步一张「A + B → C」，条件写在箭头上方，可逆反应用 ⇌。讲机理时一步一张，图下紧跟这一步的讲解。
+- **弯箭头**：在反应物上画电子推动箭头。起点可以是孤对电子（`lp:1`）或一根键（`bond:2-3`），终点可以是原子或正在形成的键，也支持单电子的鱼钩箭头。原子用 SMILES 里的映射号指定（`[OH-:1]`），质子转移时把 H 显式写出（`[H:5]`）。
 - **高亮**：用 SMARTS（`"C=O"`）或原子映射号（`[NH2:1]`）给原子和键加上彩色底色，标出正在讲的部分。
 - **点选原子**：在卡片上点选原子，自动转成片段 SMILES 和带编号的 SMILES，推给模型或填入输入框；模型可以用同样的编号回过头来高亮。
 - **检查机理**（`check_mechanism`，不显示卡片）：检查每个物种的价态、意外的自由基（例如 `C[N+](C)C` 漏写了 H）、不稳定的碳正离子、酸碱条件矛盾，以及每一步的原子与电荷是否守恒、前后步骤是否衔接。明显的笔误会被直接拒绝，模型收到原因后自行修正。
@@ -59,16 +60,17 @@ ngrok http 8000
 | 工具 | 谁调用 | 作用 |
 |---|---|---|
 | `draw_molecule` | 模型 | 画一个分子，可带 `highlights` |
-| `draw_reaction_step` | 模型 | 画一步「A + B → C」，`highlights` 用 `side` 和 `index` 指明标在哪个物种上 |
+| `draw_reaction_step` | 模型 | 画一步「A + B → C」；`highlights` 用 `side` 和 `index` 指明标在哪个物种上，`arrows` 画弯箭头 |
 | `check_mechanism` | 模型 | 画多步机理之前整体检查一遍，不显示卡片 |
 | `render_structure_svg` | 仅卡片 | 宿主没有把图交给卡片时，卡片自己取图 |
+| `render_reactant_scheme` | 仅卡片 | 同上，用于带弯箭头的反应物整图 |
 | `describe_selection` | 仅卡片 | 把点选的原子转成片段 SMILES 和带编号的 SMILES |
 
 ## 已知限制
 
 - **模型不一定会主动画图**：需要用户侧的提示，比如个人偏好、项目说明或 Skill，见上文。
 - **化学检查只查账面错误**：查得出价态、守恒和前后衔接的问题，判断不了「这种条件下会不会这样反应」，也判断不了选择性。
-- **还没有弯箭头**（电子推动箭头），在计划中。
+- **弯箭头是第一版**：箭头的弯曲方向和位置由简单的打分规则自动选择，复杂的分子上可能和别的键或标签挤在一起；暂不校验箭头和产物是否对得上（计划在 v0.5）。
 - **Claude 是否支持 `ui/update-model-context` 未确认**：如果不支持，点选原子后需要点「提问」，模型才知道你选了什么。
 - **ChatGPT 未实测。**
 - **重新打开历史对话时，chemcard 服务器需要在运行**：Claude 不把 `_meta` 交给卡片，卡片要回服务器取图。
@@ -81,6 +83,8 @@ ngrok http 8000
 - **Claude 不把工具结果里的 `_meta` 交给卡片**：卡片拿不到 SVG，就会显示为空白。解决办法是提供一个只给卡片调用的工具（`visibility: ["app"]`），让卡片通过 `tools/call` 自己取图。
 - **卡片向宿主报告高度 0 会导致空白卡片**：内容出现之前不要发送 `size-changed`。
 - **RDKit 的自适应画布（`MolDraw2DSVG(-1, -1)`）会忽略 `fixedBondLength`**：先画一遍测出实际键长，再按比例缩放坐标后重画。
+- **没有哪一种布局算法总是最好的**：CoordGen 画普通分子和大环最干净，却会把托品烷、可卡因的 N-甲基画进环里；RDKit 自带算法加环系模板正好相反。现在每个分子都用两种算法各画一遍，按键交叉、原子重叠、原子压在键上、取代基落进环里、键长是否均匀打分，只有明显更好时才放弃 CoordGen（`render.layout_quality`，对比结果可运行 `scripts/layout_benchmark.py` 查看）。
+- **吗啡喃这类多桥环骨架，所有布局算法都会画乱**（N-甲基横穿环、原子挤在一起），随机多试也没用：只能给这个骨架准备一份教科书坐标作为模板（见 `chem/templates/`）。
 - **CoordGen 给单独一个 `[H+]` 算出的坐标是 NaN**，画出来是 0×0 的空图；桥环骨架用 CoordGen 也画得很别扭。这两种情况改用 RDKit 自带的布局算法并开启 `useRingTemplates`。
 - **RDKit 的 SVG 声明编码为 `iso-8859-1`**：图例里的中文会变成乱码，所以图注改放在 HTML 里。
 - **RDKit 会把 `C[N+](C)C` 当成自由基阳离子，而不会报错**：如果要防住模型漏写 H，需要自己加规则检查。
@@ -96,6 +100,8 @@ src/chemcard/
     reaction.py       反应步骤的原子与电荷守恒检查
     lint.py           化学规则检查
     mechanism.py      整条机理检查（规则检查 + 守恒 + 前后衔接）
+    scheme.py         带弯箭头的反应物整图：解析箭头、排布分子、计算箭头几何
+    templates/        难画骨架的教科书 2D 坐标（吗啡喃、4,5-环氧吗啡喃）
   server.py        ② MCP 适配层：注册工具和资源、组装返回值，不做化学计算
   descriptions.py     模型读到的所有文字（工具描述、服务器说明、调用后的提醒）
   widgets/card.html ③ 卡片：原生 HTML/CSS/JS，只负责显示，不解析化学
@@ -117,6 +123,7 @@ scripts/mock_host.py  本地模拟宿主
 ```bash
 uv run pytest                        # 运行测试
 uv run python scripts/mock_host.py   # 本地预览：http://127.0.0.1:8765/
+uv run python scripts/layout_benchmark.py   # 各布局算法在难画分子上的得分对比
 ```
 
 本地预览是一个模拟聊天页：不用接入 Claude 或 ChatGPT，就能在自己电脑上看卡片效果、切换亮/暗主题、试点选原子。
@@ -128,7 +135,7 @@ uv run python scripts/mock_host.py   # 本地预览：http://127.0.0.1:8765/
 | v0.1 ✓ | 单分子卡片 |
 | v0.2 ✓ | 反应步骤卡片，以及机理检查（`check_mechanism`） |
 | v0.3 ✓ | 高亮；点选原子回传给模型 |
-| v0.4 | 弯箭头：在反应物上叠加电子推动箭头，用原子映射号指定起点和终点 |
+| v0.4 ✓ | 弯箭头：在反应物上叠加电子推动箭头，用原子映射号指定起点和终点 |
 | v0.5 | 电子推动校验：按箭头推算产物，并与给出的产物比对 |
 
 ## 致谢与许可
@@ -136,6 +143,7 @@ uv run python scripts/mock_host.py   # 本地预览：http://127.0.0.1:8765/
 本项目使用 [MIT 许可证](LICENSE)。
 
 - [RDKit](https://www.rdkit.org/)（BSD-3-Clause）：所有化学解析和绘图。
+- [PubChem](https://pubchem.ncbi.nlm.nih.gov/)：`chem/templates/` 中的骨架坐标取自 PubChem 的 2D 结构（右美沙芬 CID 5360696、吗啡 CID 5288826）。
 - [MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) 与 [MCP Apps 规范](https://github.com/modelcontextprotocol/ext-apps)。
 - 思路参考（没有复制任何代码）：[ChemCP](https://github.com/scottmreed/ChemCP)、[chemdraw-mcp](https://github.com/jurimaxam-dotcom/chemdraw-mcp)、[ChemKit](https://github.com/Oli-CodeHub/ChemKit)，以及 OpenAI 的 [Apps SDK 示例](https://github.com/openai/openai-apps-sdk-examples)。
 
