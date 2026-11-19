@@ -86,10 +86,18 @@ def render_smiles(
     return Structure(svg=svg, canonical_smiles=canonical, formula=formula, width=width, height=height, atoms=atoms)
 
 
+def _smiles_params() -> Chem.SmilesParserParams:
+    # Keep H atoms the SMILES writes explicitly ([H], [H:5]): mechanism steps point
+    # arrows at them (proton transfers). Ordinary implicit Hs are unaffected.
+    params = Chem.SmilesParserParams()
+    params.removeHs = False
+    return params
+
+
 def mol_from_smiles(smiles: str) -> Chem.Mol | None:
     """`Chem.MolFromSmiles` without RDKit log noise (stdio servers log stderr to the host)."""
     with rdBase.BlockLogs():
-        return Chem.MolFromSmiles(smiles)
+        return Chem.MolFromSmiles(smiles, _smiles_params())
 
 
 def parse_smiles(smiles: str) -> Chem.Mol:
@@ -103,7 +111,7 @@ def parse_smiles(smiles: str) -> Chem.Mol:
     log = io.StringIO()
     rdBase.LogToPythonStderr()
     with contextlib.redirect_stderr(log):
-        mol = Chem.MolFromSmiles(smiles)
+        mol = Chem.MolFromSmiles(smiles, _smiles_params())
     if mol is None:
         reason = _rdkit_reason(log.getvalue())
         raise InvalidSmiles(f"RDKit could not parse {smiles!r}" + (f": {reason}" if reason else ""))
@@ -134,12 +142,23 @@ def _label_dummies(mol: Chem.Mol) -> None:
         atom.SetProp("atomLabel", "R" if len(dummies) == 1 else f"R<sub>{i}</sub>")
 
 
-def _draw(mol: Chem.Mol, atom_colors: dict[int, str], bond_colors: dict[int, str]) -> tuple[str, int, int, list[tuple[float, float]]]:
+def _draw(
+    mol: Chem.Mol,
+    atom_colors: dict[int, str],
+    bond_colors: dict[int, str],
+    *,
+    layout: bool = True,
+    drawer_out: list | None = None,
+) -> tuple[str, int, int, list[tuple[float, float]]]:
     # Flexicanvas ignores `fixedBondLength`: its pixel size follows the
     # coordinates. So lay out, draw once to measure, rescale the coordinates
     # to hit BOND_LENGTH_PX exactly, then draw for real.
-    _layout(mol)
-    rdDepictor.NormalizeDepiction(mol)  # canonical orientation, uniform bond length
+    # layout=False keeps the caller's coordinates (reaction schemes place several
+    # molecules themselves); `drawer_out` receives the final drawer for further
+    # coordinate queries.
+    if layout:
+        _layout(mol)
+        rdDepictor.NormalizeDepiction(mol)  # canonical orientation, uniform bond length
     measured = _median_bond_px(_drawer_with(mol), mol)
     if measured:
         factor = BOND_LENGTH_PX / measured
@@ -155,23 +174,166 @@ def _draw(mol: Chem.Mol, atom_colors: dict[int, str], bond_colors: dict[int, str
     for i in range(mol.GetNumAtoms()):
         p = drawer.GetDrawCoords(i)
         coords.append((round(p.x, 1), round(p.y, 1)))
+    if drawer_out is not None:
+        drawer_out.append(drawer)
     return svg, int(drawer.Width()), int(drawer.Height()), coords
 
 
-def _layout(mol: Chem.Mol) -> None:
-    """Compute 2D coordinates with the engine that draws this molecule best.
+def _scaffold_templates() -> list[tuple[str, Chem.Mol, Chem.Mol]]:
+    """(reference molecule with good 2D coordinates, scaffold query) pairs, loaded once.
 
-    - CoordGen: cleanest for ordinary rings and macrocycles (default).
-    - RDKit's own depictor with ring-system templates: bridged bicyclics
-      (tropanes, norbornanes, …), where CoordGen pushes substituents into
-      the ring. Also the fallback when CoordGen fails (it returns NaN
-      coordinates for a lone H+).
+    For skeletons no layout engine draws well. Each .mol file in templates/ holds a
+    molecule with textbook coordinates; its first line names it and its source.
     """
-    if rdMolDescriptors.CalcNumBridgeheadAtoms(mol) == 0:
-        rdCoordGen.AddCoords(mol)
-        if mol.GetNumConformers() and not _has_nan(mol):
-            return
-    rdDepictor.Compute2DCoords(mol, useRingTemplates=True)
+    global _TEMPLATES
+    if _TEMPLATES is None:
+        from importlib.resources import files
+
+        _TEMPLATES = []
+        for name, smarts in _TEMPLATE_SCAFFOLDS.items():
+            ref = Chem.MolFromMolBlock((files("chemcard.chem") / "templates" / f"{name}.mol").read_text())
+            _TEMPLATES.append((name, ref, Chem.MolFromSmarts(smarts)))
+    return _TEMPLATES
+
+
+_TEMPLATES: list | None = None  # [(name, reference, scaffold)]
+_TEMPLATE_SCAFFOLDS = {  # most specific first
+    # 4,5-epoxymorphinan: morphine, codeine, naloxone, oxycodone… (the O bridge needs its own template)
+    "epoxymorphinan": "[#6]1~[#6]~[#6]~[#6]2~[#6]3~[#6]~1~[#8]~[#6]1~[#6]~[#6]~[#6]~[#6]4~[#6](~[#6]~2)~[#7]~[#6]~[#6]~[#6]~3~1~4",
+    # morphinan: dextromethorphan, levorphanol… (any bonds, so unsaturation/aromaticity may differ)
+    "morphinan": "[#6]1~[#6]~[#6]~[#6]2~[#6](~[#6]~1)~[#6]13~[#6]~[#6]~[#6]~[#6]~[#6]~1~[#6](~[#6]~2)~[#7]~[#6]~[#6]~3",
+}
+
+
+def _layout(mol: Chem.Mol) -> str:
+    """Compute 2D coordinates, choosing the layout that draws this molecule best.
+
+    1. Scaffold templates win outright: hand-picked textbook coordinates for
+       skeletons every engine draws badly (morphinans: the N bridge ended up
+       across the rings). Textbook drawings are conventions, not derivable.
+    2. Otherwise several engines each lay the molecule out and the one with the
+       best `layout_quality` score is kept (fewest bond crossings, no clashing
+       atoms, no atom sitting on a bond, even bond lengths). Ties go to the
+       earlier engine in LAYOUT_ENGINES, so ordinary molecules keep CoordGen.
+
+    Returns which layout was used ("template:<name>" or an engine name).
+    """
+    for name, ref, scaffold in _scaffold_templates():
+        if mol.HasSubstructMatch(scaffold):
+            try:
+                rdDepictor.GenerateDepictionMatching2DStructure(mol, ref, refPatt=scaffold, acceptFailure=False)
+                if not _has_nan(mol):
+                    return f"template:{name}"
+            except ValueError:
+                pass  # fall through to the generic engines
+
+    best = None
+    for name, engine in LAYOUT_ENGINES:
+        trial = Chem.Mol(mol)
+        try:
+            engine(trial)
+        except (RuntimeError, ValueError):
+            continue
+        if not trial.GetNumConformers() or _has_nan(trial):
+            continue  # e.g. CoordGen on a lone H+
+        score = layout_quality(trial)["score"]
+        # switch away from the preferred engine only for a real improvement, not for
+        # a slightly more uniform bond length (CoordGen's are never exactly equal)
+        if best is None or score < best[0] - LAYOUT_MIN_GAIN:
+            best = (score, name, trial)
+    if best is None:  # nothing worked: RDKit's own depictor always produces something
+        rdDepictor.Compute2DCoords(mol)
+        return "rdkit"
+    _, name, trial = best
+    mol.RemoveAllConformers()
+    mol.AddConformer(Chem.Conformer(trial.GetConformer()), assignId=True)
+    return name
+
+
+def _rdkit_templates(m: Chem.Mol) -> None:
+    rdDepictor.Compute2DCoords(m, useRingTemplates=True)
+
+
+# (RDKit's random flip sampling was tried too: on the benchmark it never beat the
+# plain template layout, so it is not worth the time.)
+LAYOUT_ENGINES = (  # order = preference on equal scores
+    ("coordgen", lambda m: rdCoordGen.AddCoords(m)),
+    ("rdkit-templates", _rdkit_templates),
+)
+LAYOUT_MIN_GAIN = 0.5  # score points; one bond-length spread of 10% costs 0.5
+
+
+def layout_quality(mol: Chem.Mol) -> dict:
+    """Score a 2D layout; lower is better. Scale-free (distances in median bond lengths).
+
+    - crossings: pairs of bonds that cross (not sharing an atom)
+    - clashes: atom pairs closer than 0.5 bond length
+    - on_bond: atoms closer than 0.3 bond length to a bond they are not part of
+    - inside: atoms that are in no ring but sit inside a ring's polygon (a substituent
+      drawn into a ring, e.g. CoordGen's N-methyl of tropinone). Bridge atoms inside
+      another ring are the normal way to draw bridged systems and are not counted.
+    - spread: coefficient of variation of the bond lengths
+    """
+    import itertools
+
+    pos = mol.GetConformer().GetPositions()[:, :2]
+    bonds = [(b.GetBeginAtomIdx(), b.GetEndAtomIdx()) for b in mol.GetBonds()]
+    if not bonds:
+        return {"score": 0.0, "crossings": 0, "clashes": 0, "on_bond": 0, "inside": 0, "spread": 0.0}
+    lengths = [math.dist(pos[a], pos[b]) for a, b in bonds]
+    unit = sorted(lengths)[len(lengths) // 2] or 1.0
+
+    def side(a, b, c):
+        return (c[0] - a[0]) * (b[1] - a[1]) - (b[0] - a[0]) * (c[1] - a[1])
+
+    crossings = 0
+    for (a, b), (c, d) in itertools.combinations(bonds, 2):
+        if len({a, b, c, d}) < 4:
+            continue
+        if side(pos[c], pos[d], pos[a]) * side(pos[c], pos[d], pos[b]) < 0 and \
+           side(pos[a], pos[b], pos[c]) * side(pos[a], pos[b], pos[d]) < 0:
+            crossings += 1
+    n = len(pos)
+    clashes = sum(1 for i, j in itertools.combinations(range(n), 2) if math.dist(pos[i], pos[j]) < 0.5 * unit)
+    on_bond = 0
+    for i in range(n):
+        for a, b in bonds:
+            if i in (a, b):
+                continue
+            if _point_segment_distance(pos[i], pos[a], pos[b]) < 0.3 * unit:
+                on_bond += 1
+    ring_info = mol.GetRingInfo()
+    in_ring = {i for ring in ring_info.AtomRings() for i in ring}
+    inside = 0
+    for i in range(n):
+        if i in in_ring:
+            continue
+        if any(_inside_polygon(pos[i], [pos[j] for j in ring]) for ring in ring_info.AtomRings()):
+            inside += 1
+    mean = sum(lengths) / len(lengths)
+    spread = (sum((x - mean) ** 2 for x in lengths) / len(lengths)) ** 0.5 / mean if mean else 0.0
+    score = 10 * crossings + 8 * clashes + 8 * inside + 6 * on_bond + 5 * spread
+    return {"score": round(score, 4), "crossings": crossings, "clashes": clashes, "on_bond": on_bond,
+            "inside": inside, "spread": round(spread, 4)}
+
+
+def _inside_polygon(p, poly) -> bool:
+    x, y = p
+    inside = False
+    for k in range(len(poly)):
+        (x1, y1), (x2, y2) = poly[k], poly[(k + 1) % len(poly)]
+        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
+            inside = not inside
+    return inside
+
+
+def _point_segment_distance(p, a, b) -> float:
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    L2 = dx * dx + dy * dy
+    if L2 == 0:
+        return math.dist(p, a)
+    t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2))
+    return math.dist(p, (a[0] + t * dx, a[1] + t * dy))
 
 
 def _has_nan(mol: Chem.Mol) -> bool:

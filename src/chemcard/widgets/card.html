@@ -151,20 +151,51 @@
     });
   }
 
+  // With curved arrows the reactants are ONE drawing (arrows cross between molecules),
+  // fetched like the others when the host dropped `_meta`.
+  function reactantSchemeOrFetch(data, meta) {
+    if (meta.reactant_scheme && meta.reactant_scheme.svg) return Promise.resolve(meta.reactant_scheme);
+    state.fallback = "没有 _meta 图，改用 tools/call 获取…";
+    return callTool("render_reactant_scheme", {
+      reactants: data.reactants.map((sp) => ({ smiles: sp.canonical_smiles, highlight: sp.highlight || null })),
+      arrows: data.arrows,
+    });
+  }
+
   function renderReaction(data, meta) {
-    const sides = ["reactants", "products"];
-    const jobs = sides.map((side) =>
-      Promise.all((data[side] || []).map((sp, i) => drawingOrFetch((meta[side] || [])[i], sp))));
-    return Promise.all(jobs).then(([left, right]) => {
+    const withArrows = Array.isArray(data.arrows) && data.arrows.length > 0;
+    const left = withArrows
+      ? reactantSchemeOrFetch(data, meta)
+      : Promise.all((data.reactants || []).map((sp, i) => drawingOrFetch((meta.reactants || [])[i], sp)));
+    const right = Promise.all((data.products || []).map((sp, i) => drawingOrFetch((meta.products || [])[i], sp)));
+    return Promise.all([left, right]).then(([left, right]) => {
       const scheme = document.createElement("div");
       scheme.className = "scheme";
       if ([...data.reactants, ...data.products].some((sp) => sp.label)) scheme.classList.add("labelled");
-      appendSide(scheme, data.reactants, left);
+      if (withArrows) appendComposite(scheme, data.reactants, left);
+      else appendSide(scheme, data.reactants, left);
       scheme.appendChild(arrowEl(data.conditions, data.reversible));
       appendSide(scheme, data.products, right);
       paper().appendChild(scheme);
       setCaption(data.caption || "");
     });
+  }
+
+  // Reactants drawn together with arrows; names hang under each molecule's centre.
+  function appendComposite(scheme, species, d) {
+    const box = document.createElement("div");
+    box.className = "species";
+    box.appendChild(molView(d, species[0], species.map((sp) => sp.label || sp.formula).join(" + "), species));
+    (d.species || []).forEach((pos, i) => {
+      const sp = species[i];
+      if (!sp || !sp.label || !d.width) return;
+      const name = document.createElement("div");
+      name.className = "name";
+      name.style.left = `${(pos.cx / d.width) * 100}%`;
+      name.textContent = sp.label;
+      box.appendChild(name);
+    });
+    scheme.appendChild(box);
   }
 
   function appendSide(scheme, species, drawings) {
@@ -190,7 +221,8 @@
 
   // One molecule: <img> of the SVG plus an overlay of one click target per atom.
   const SVGNS = "http://www.w3.org/2000/svg";
-  function molView(d, species, name) {
+  // `speciesList` is given for a combined drawing: each atom then carries {species, index}.
+  function molView(d, species, name, speciesList) {
     const wrap = document.createElement("div");
     wrap.className = "mol";
     const img = document.createElement("img");
@@ -214,7 +246,10 @@
         c.setAttribute("tabindex", "0");
         c.setAttribute("role", "button");
         c.setAttribute("aria-label", `${a.el} 原子 ${i + 1}`);
-        const toggle = () => toggleAtom({ smiles: species.canonical_smiles, name, atoms: d.atoms }, i, c);
+        const own = speciesList && a.species !== undefined ? speciesList[a.species] : species;
+        const index = a.index !== undefined ? a.index : i;
+        const ownName = speciesList ? (own.label || own.formula || name) : name;
+        const toggle = () => toggleAtom({ smiles: own.canonical_smiles, name: ownName }, index, c);
         c.addEventListener("click", toggle);
         c.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
         hits.appendChild(c);

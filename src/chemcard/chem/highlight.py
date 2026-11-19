@@ -66,6 +66,18 @@ def resolve(smiles: str, specs: list[HighlightSpec]) -> Resolved:
     return Resolved(canonical, atom_colors, bond_colors)
 
 
+def canonical_maps(smiles: str) -> tuple[str, dict[int, int]]:
+    """Canonical SMILES (maps dropped) and {atom-map number: canonical atom index}."""
+    mol = parse_smiles(smiles)
+    by_map = {a.GetAtomMapNum(): a.GetIdx() for a in mol.GetAtoms() if a.GetAtomMapNum()}
+    for a in mol.GetAtoms():
+        a.SetAtomMapNum(0)
+    canonical = Chem.MolToSmiles(mol)
+    order = list(mol.GetPropsAsDict(True, True)["_smilesAtomOutputOrder"])
+    to_canon = {orig: pos for pos, orig in enumerate(order)}
+    return canonical, {m: to_canon[i] for m, i in by_map.items()}
+
+
 def _match(mol: Chem.Mol, spec: HighlightSpec, by_map: dict[int, int], smiles: str) -> tuple[set[int], set[tuple[int, int]]]:
     if bool(spec.smarts) == bool(spec.atoms):
         raise InvalidHighlight("each highlight needs exactly one of `smarts` or `atoms`")
