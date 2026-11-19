@@ -33,8 +33,13 @@ def test_clean_cage_view_with_one_depth_cue(smiles):
 
 @pytest.mark.parametrize("smiles", ["C1CCCCCC1", "C1C2CC3CC1CC(C2)C3", "C1CC2CCC1N2",
                                     "C1CC2CCC1C2.C", "CCC1CC2CCC1C2", "C1=CC2CCC1C2"])
-def test_other_ring_topologies_and_sidechains_use_existing_engines(smiles):
+def test_hand_tuned_views_cover_only_the_plain_carbon_cage(smiles):
+    # other bicycles are offered projected perspectives instead (chem/perspective.py)
     assert list(bridge_candidates(Chem.MolFromSmiles(smiles))) == []
+
+
+@pytest.mark.parametrize("smiles", ["C1CCCCCC1", "C1C2CC3CC1CC(C2)C3"])
+def test_non_bicyclic_rings_get_no_depth_gap(smiles):
     assert "bridge-gap" not in render_smiles(smiles).svg
 
 

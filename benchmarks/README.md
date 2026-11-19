@@ -39,3 +39,17 @@ across the rings (6 crossings vs 2 for CoordGen). Fixed the same day: a template
 wins outright only if it adds no crossing beyond its own textbook bridge; otherwise
 it competes on score. Buprenorphine now gets CoordGen (2 crossings, substituents
 outside the cage); the other nine morphinans keep their templates.
+
+## 2026-11-19 — projected perspectives for any bicyclo[a.b.c]
+
+Clean share unchanged (85 %), no new flags, still no selection mistakes. Twelve
+molecules now get a projected perspective view (checked by eye):
+
+- [2.2.2]: bicyclo[2.2.2]octane, DABCO, quinuclidine, barrelene, quinine (its quinuclidine)
+- [2.2.1] outside the hand-tuned family: norbornene, norbornadiene, 7-oxanorbornane, epibatidine
+- [3.2.1]: tropinone, atropine
+- [3.1.1]: beta-pinene
+
+Crowded projections (cocaine, fenchone, 1,8-cineole) lose to the general engines as
+intended. Molecules above 40 heavy atoms skip the 3D embedding (amphotericin B took
+1.5 s for no usable view); slowest render is back to ~0.3 s.

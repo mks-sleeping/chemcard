@@ -19,6 +19,7 @@ from rdkit.Chem import rdCoordGen, rdDepictor, rdMolDescriptors
 from rdkit.Chem.Draw import rdMolDraw2D
 
 from chemcard.chem.bridged_layout import GAP_FRACTION, bridge_candidates, bridge_gaps
+from chemcard.chem.perspective import perspective_candidates
 
 MAX_SMILES_LEN = 500
 MAX_HEAVY_ATOMS = 150
@@ -237,7 +238,8 @@ def layout_candidates(mol: Chem.Mol) -> Iterator[tuple[str, Chem.Mol]]:
             continue
         yield f"template:{name}", trial
 
-    yield from bridge_candidates(mol)
+    yield from bridge_candidates(mol)      # hand-tuned saturated all-carbon [2.2.1]
+    yield from perspective_candidates(mol)  # any bicyclo[a.b.c]: projected from 3D
 
     for name, engine in LAYOUT_ENGINES:
         trial = Chem.Mol(mol)
@@ -313,7 +315,8 @@ def _layout(mol: Chem.Mol) -> str:
         # collide, it competes on geometry alongside the general engines.
         clear_bridge = (name.startswith("bridge-") and quality["crossings"] == 1
                         and not any(quality[k] for k in ("clashes", "on_bond", "inside", "label_contacts")))
-        rank = 0 if clear_bridge else 1
+        # hand-tuned [2.2.1] views first, then projected perspectives, then the general engines
+        rank = (0 if name.startswith("bridge-221") else 0.5) if clear_bridge else 1
         score = quality["score"]
         if best is None or rank < best[0] or (rank == best[0] and score < best[1] - LAYOUT_MIN_GAIN):
             best = (rank, score, name, trial)

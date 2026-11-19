@@ -146,7 +146,7 @@ def test_substituent_drawn_into_a_ring_loses(smiles):
     rdCoordGen.AddCoords(m)
     assert layout_quality(m)["inside"] >= 1
     chosen = Chem.MolFromSmiles(smiles)
-    assert _layout(chosen) == "rdkit-templates"
+    assert _layout(chosen) != "coordgen"   # a template or projected perspective wins instead
     assert layout_quality(chosen)["inside"] == 0
 
 
