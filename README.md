@@ -54,14 +54,6 @@ ngrok http 8000
 
 `CHEMCARD_ALLOWED_HOSTS` 用于放行隧道域名，否则 MCP SDK 的 DNS rebinding 防护会返回 `421 Invalid Host header`。然后在 ChatGPT 中选择「Add custom MCP server」，填入 `https://xxxx.ngrok-free.app/mcp`。
 
-### 本地预览（不需要任何宿主）
-
-```bash
-uv run python scripts/mock_host.py
-```
-
-打开 http://127.0.0.1:8765/ ：这是一个模拟聊天页，用真实卡片跑一遍 MCP Apps 握手，可以切换亮/暗主题、点选原子，每张卡片收发的消息都会显示出来。打开 http://127.0.0.1:8765/?demo=1 是 README 截图用的干净版本。
-
 ## 工具一览
 
 | 工具 | 谁调用 | 作用 |
@@ -119,6 +111,15 @@ scripts/mock_host.py  本地模拟宿主
 | `content` | 模型和卡片（不支持 UI 的客户端只显示它） | 一句文字说明，以及给模型的提醒 |
 | `structuredContent` | 模型和卡片 | 精简信息：标准化 SMILES、分子式、图注、高亮 |
 | `_meta` | 只有卡片 | SVG 本体和原子坐标，不占用模型上下文 |
+
+## 开发
+
+```bash
+uv run pytest                        # 运行测试
+uv run python scripts/mock_host.py   # 本地预览：http://127.0.0.1:8765/
+```
+
+本地预览是一个模拟聊天页：不用接入 Claude 或 ChatGPT，就能在自己电脑上看卡片效果、切换亮/暗主题、试点选原子。
 
 ## 路线
 
