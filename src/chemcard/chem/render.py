@@ -275,16 +275,40 @@ def layout_problem(mol: Chem.Mol, trial: Chem.Mol) -> str | None:
     return None
 
 
+def _template_crossings(name: str) -> int:
+    """Bond crossings the template's own reference drawing has (the textbook view's own)."""
+    if name not in _TEMPLATE_CROSSINGS:
+        ref = next(r for n, r, _ in _scaffold_templates() if n == name)
+        _TEMPLATE_CROSSINGS[name] = layout_quality(ref)["crossings"]
+    return _TEMPLATE_CROSSINGS[name]
+
+
+_TEMPLATE_CROSSINGS: dict[str, int] = {}
+
+
 def _layout(mol: Chem.Mol) -> str:
-    """Prefer valid reference and clear cage views, then compare geometric quality."""
+    """Prefer valid reference and clear cage views, then compare geometric quality.
+
+    A scaffold template wins outright only if it adds no bond crossing beyond the
+    one its textbook view already has. Parts of a molecule the template does not
+    cover are placed by RDKit around it and can end up across the rings
+    (buprenorphine's extra 6,14-bridge: 6 crossings vs CoordGen's 2); such a
+    template drawing then competes on score like any other candidate. Crowded
+    labels alone (naloxone's 14-OH) do not disqualify the textbook view.
+    """
     best = None
     for name, trial in layout_candidates(mol):
         if layout_problem(mol, trial):
             continue
-        if name.startswith("template:"):
-            best = (0, 0, name, trial)
-            break
         quality = layout_quality(trial)
+        if name.startswith("template:"):
+            if quality["crossings"] <= _template_crossings(name.split(":", 1)[1]):
+                best = (0, 0, name, trial)
+                break
+            rank, score = 1, quality["score"]
+            if best is None or rank < best[0] or score < best[1] - LAYOUT_MIN_GAIN:
+                best = (rank, score, name, trial)
+            continue
         # A clear, depth-cued cage keeps the conventional view. If substituents
         # collide, it competes on geometry alongside the general engines.
         clear_bridge = (name.startswith("bridge-") and quality["crossings"] == 1
@@ -403,6 +427,101 @@ def layout_quality(mol: Chem.Mol) -> dict:
              + 6 * on_bond + 4 * label_contacts + 5 * spread)
     return {"score": round(score, 4), "crossings": crossings, "clashes": clashes, "on_bond": on_bond,
             "inside": inside, "label_contacts": label_contacts, "spread": round(spread, 4)}
+
+
+def svg_label_overlaps(svg: str) -> list[dict]:
+    """Overlaps visible in the final drawing, read from RDKit's SVG.
+
+    `layout_quality` scores the molecule's coordinates, but RDKit adds atoms while
+    drawing (an explicit H on a stereocentre) and sizes labels itself, so some
+    collisions exist only in the picture: in artemisinin's card a drawing-time H sat
+    3.7 px from the peroxide O. This reads the glyph paths (class='atom-N') and bond
+    paths (class='bond-K atom-A atom-B') and reports
+      - "label/label": two atoms' labels overlap;
+      - "label/bond": a bond not attached to the atom runs through its label.
+    Boxes are shrunk by LABEL_SLACK px so labels merely touching are not reported.
+    """
+    boxes = _svg_label_boxes(svg)
+    found = []
+    items = sorted(boxes.items())
+    for k, (a, ba) in enumerate(items):
+        for b, bb in items[k + 1:]:
+            if _boxes_overlap(_shrink(ba), _shrink(bb)):
+                ca, cb = _centre(ba), _centre(bb)
+                found.append({"kind": "label/label", "atoms": (a, b), "distance": round(math.dist(ca, cb), 2)})
+    seen = set()  # a hashed wedge or a split-colour bond is several paths: report it once
+    for atoms, segments in _svg_bond_segments(svg):
+        for a, box in items:
+            key = (a, tuple(sorted(atoms)))
+            if a in atoms or key in seen:
+                continue
+            if any(_segment_hits_box(p, q, _shrink(box)) for p, q in segments):
+                seen.add(key)
+                found.append({"kind": "label/bond", "atoms": (a,), "bond_atoms": key[1]})
+    return found
+
+
+LABEL_SLACK = 1.0  # px
+
+
+def _svg_label_boxes(svg: str) -> dict[int, tuple[float, float, float, float]]:
+    boxes: dict[int, tuple[float, float, float, float]] = {}
+    for m in re.finditer(r"<path class='atom-(\d+)' d='([^']*)'", svg):
+        nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", m.group(2))]
+        xs, ys = nums[0::2], nums[1::2]
+        if not xs:
+            continue
+        i = int(m.group(1))
+        box = (min(xs), min(ys), max(xs), max(ys))
+        if i in boxes:  # a label drawn as several glyph paths ("OH", "NH2")
+            o = boxes[i]
+            box = (min(o[0], box[0]), min(o[1], box[1]), max(o[2], box[2]), max(o[3], box[3]))
+        boxes[i] = box
+    return boxes
+
+
+def _svg_bond_segments(svg: str) -> list[tuple[set[int], list]]:
+    out = []
+    for m in re.finditer(r"<path (?:mask='[^']*' )?class='bond-\d+((?: atom-\d+)+)' d='([^']*)'", svg):
+        atoms = {int(x) for x in re.findall(r"atom-(\d+)", m.group(1))}
+        nums = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", m.group(2))]
+        pts = list(zip(nums[0::2], nums[1::2]))
+        out.append((atoms, list(zip(pts, pts[1:]))))
+    return out
+
+
+def _shrink(box):
+    x0, y0, x1, y1 = box
+    return (x0 + LABEL_SLACK, y0 + LABEL_SLACK, x1 - LABEL_SLACK, y1 - LABEL_SLACK)
+
+
+def _centre(box):
+    return ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+
+
+def _boxes_overlap(a, b) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _segment_hits_box(p, q, box) -> bool:
+    """Liang–Barsky clip: does segment p–q pass through the axis-aligned box?"""
+    x0, y0, x1, y1 = box
+    if x0 >= x1 or y0 >= y1:
+        return False
+    dx, dy = q[0] - p[0], q[1] - p[1]
+    t0, t1 = 0.0, 1.0
+    for d, lo, hi, s in ((dx, x0, x1, p[0]), (dy, y0, y1, p[1])):
+        if d == 0:
+            if s < lo or s > hi:
+                return False
+            continue
+        ta, tb = (lo - s) / d, (hi - s) / d
+        if ta > tb:
+            ta, tb = tb, ta
+        t0, t1 = max(t0, ta), min(t1, tb)
+        if t0 > t1:
+            return False
+    return True
 
 
 def _inside_polygon(p, poly) -> bool:

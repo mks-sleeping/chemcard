@@ -96,6 +96,35 @@ def test_morphinans_use_textbook_template(smiles, template):
     assert render_smiles(smiles).width > 0
 
 
+BUPRENORPHINE = "CC(C)(C)[C@](C)([C@H]1C[C@@]23CC[C@]1([C@H]4[C@@]25CCN([C@@H]3CC6=C5C(=C(C=C6)O)O4)CC7CC7)OC)O"  # PubChem CID 644073
+
+
+def test_template_that_adds_crossings_competes_instead_of_winning():
+    # buprenorphine matches the epoxymorphinan scaffold, but its extra 6,14-bridge is not in the
+    # template and got drawn across the rings (6 crossings vs CoordGen's 2): the template must not win
+    from rdkit import Chem
+
+    from chemcard.chem.render import _layout, _template_crossings, layout_quality
+
+    m = Chem.MolFromSmiles(BUPRENORPHINE)
+    assert not _layout(m).startswith("template:")
+    assert layout_quality(m)["crossings"] < 6
+    # the templates themselves have one crossing: the textbook bridge
+    assert _template_crossings("epoxymorphinan") == 1 and _template_crossings("morphinan") == 1
+
+
+@pytest.mark.parametrize("smiles", [
+    "CN1CC[C@]23c4c5ccc(O)c4O[C@H]2[C@@H](O)C=C[C@H]3[C@H]1C5",                 # morphine
+    "O=C1CC[C@@]2(O)[C@H]3Cc4ccc(O)c5O[C@@H]1[C@]2(CCN3CC=C)c45",              # naloxone: crowded 14-OH label only
+])
+def test_template_still_wins_when_it_adds_no_crossing(smiles):
+    from rdkit import Chem
+
+    from chemcard.chem.render import _layout
+
+    assert _layout(Chem.MolFromSmiles(smiles)) == "template:epoxymorphinan"
+
+
 def test_ordinary_molecules_keep_coordgen():
     from rdkit import Chem
 
