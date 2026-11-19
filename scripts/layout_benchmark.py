@@ -2,9 +2,8 @@
 
     uv run python scripts/layout_benchmark.py [out_dir]
 
-Prints, per molecule, each engine's quality score (crossings, clashes, atoms on
-bonds, bond-length spread) and which layout chemcard picks. With out_dir, also
-writes one SVG per molecule and engine for eyeballing.
+Shows candidate scores, geometry errors and the selection (*) at card atom order.
+With out_dir, writes the final card SVG and each drawable candidate for comparison.
 """
 
 from __future__ import annotations
@@ -13,9 +12,11 @@ import sys
 from pathlib import Path
 
 from rdkit import Chem
-from rdkit.Chem import rdDepictor
 
-from chemcard.chem.render import _draw, _layout, layout_candidates, layout_problem, layout_quality, mol_from_smiles, render_smiles
+from chemcard.chem.render import (
+    _draw, _layout, layout_candidates, layout_problem, layout_quality,
+    mol_from_smiles, normalize_layout, render_smiles,
+)
 
 MOLECULES = {
     "caffeine": "Cn1cnc2c1c(=O)n(C)c(=O)n2C",
@@ -24,6 +25,9 @@ MOLECULES = {
     "cocaine": "COC(=O)[C@H]1[C@@H](OC(=O)c2ccccc2)C[C@@H]2CC[C@H]1N2C",
     "cis-cyclooctene": r"C1/C=C\CCCCC1",
     "trans-cyclooctene": "C1/C=C/CCCCC1",
+    "norbornane": "C1CC2CCC1C2",
+    "borneol": "C[C@]12CC[C@H](C1(C)C)C[C@H]2O",
+    "isoborneol": "C[C@]12CC[C@H](C1(C)C)C[C@@H]2O",
     "camphor": "CC1(C)C2CCC1(C)C(=O)C2",
     "adamantane": "C1C2CC3CC1CC(C2)C3",
     "cubane": "C12C3C4C1C5C2C3C45",
@@ -41,7 +45,7 @@ def main() -> None:
     out = Path(sys.argv[1]) if len(sys.argv) > 1 else None
     if out:
         out.mkdir(parents=True, exist_ok=True)
-    print("molecule           candidate                    score    crossings/clashes/on-bond/inside")
+    print("molecule           candidate                    score    crossings/clashes/on-bond/inside/labels")
     for label, smi in MOLECULES.items():
         card = render_smiles(smi)
         mol = mol_from_smiles(card.canonical_smiles)
@@ -55,10 +59,10 @@ def main() -> None:
                 print(f"{label:18s} {name:28s}  {problem}")
                 continue
             q = layout_quality(trial)
-            counts = "/".join(str(q[key]) for key in ("crossings", "clashes", "on_bond", "inside"))
+            counts = "/".join(str(q[key]) for key in ("crossings", "clashes", "on_bond", "inside", "label_contacts"))
             print(f"{label:18s} {name:28s}{marker} {q['score']:6.2f}   {counts}   {problem or ''}")
             if out:
-                rdDepictor.NormalizeDepiction(trial)
+                normalize_layout(trial)
                 svg = _draw(trial, {}, {}, layout=False)[0]
                 (out / f"{label}__{name.replace(':', '-')}.svg").write_text(svg)
 

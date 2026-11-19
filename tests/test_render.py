@@ -165,3 +165,37 @@ def test_cyclooctene_geometry_on_the_final_card(smiles, same_side):
         signs.append((b["x"] - a["x"]) * (p["y"] - a["y"]) - (b["y"] - a["y"]) * (p["x"] - a["x"]))
     assert all(abs(v) > 1 for v in signs)
     assert (signs[0] * signs[1] > 0) == same_side
+
+
+def test_rejects_invalid_geometry_even_in_the_last_resort(monkeypatch):
+    from rdkit import Chem
+    from rdkit.Chem import rdCoordGen
+    from chemcard.chem import render
+
+    smi = "C1/C=C/CCCCC1"
+
+    def wrong_template(mol):
+        trial = Chem.Mol(mol)
+        rdCoordGen.AddCoords(trial)
+        yield "template:test", trial
+
+    monkeypatch.setattr(render, "layout_candidates", wrong_template)
+    monkeypatch.setattr(render.rdDepictor, "Compute2DCoords", lambda m, **kw: rdCoordGen.AddCoords(m))
+    with pytest.raises(InvalidSmiles, match="double-bond geometry"):
+        render_smiles(smi)
+
+
+def test_reference_molecule_keeps_its_substituent_coordinates():
+    import math
+    from rdkit import Chem
+    from chemcard.chem.render import _layout, _scaffold_templates
+
+    for name, ref, _ in _scaffold_templates():
+        mol = Chem.MolFromSmiles(Chem.MolToSmiles(ref))
+        assert _layout(mol) == f"template:{name}"
+        mapping = ref.GetSubstructMatch(mol, useChirality=True)
+        source = ref.GetConformer().GetPositions()
+        result = mol.GetConformer().GetPositions()
+        assert len(mapping) == len(result)
+        for i, j in enumerate(mapping):
+            assert math.dist(result[i], source[j]) < 1e-5
