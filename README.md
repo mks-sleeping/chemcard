@@ -116,7 +116,7 @@ src/chemcard/
   server.py        ② MCP 适配层：注册工具和资源、组装返回值，不做化学计算
   descriptions.py     模型读到的所有文字（工具描述、服务器说明、调用后的提醒）
   widgets/card.html ③ 卡片：原生 HTML/CSS/JS，只负责显示，不解析化学
-benchmarks/        布局基准集（231 个 PubChem 分子）与最新报告
+benchmarks/        布局基准集（231 个样例、230 个独立化合物，来自 PubChem）与最新报告
 tests/             pytest（100+ 个用例）
 evals/             触发评测：哪些问题应该画图、图文是否穿插，以及实测记录
 scripts/mock_host.py  本地模拟宿主
@@ -136,7 +136,7 @@ scripts/mock_host.py  本地模拟宿主
 uv run pytest                        # 运行测试
 uv run python scripts/mock_host.py   # 本地预览：http://127.0.0.1:8765/
 uv run python scripts/layout_benchmark.py /tmp/chemcard-layouts   # 候选得分、淘汰原因和每张卡的最终 SVG
-uv run python scripts/layout_report.py   # 231 个分子的布局质量报告（见 benchmarks/）
+uv run python scripts/layout_report.py   # 布局质量报告：坐标层面的问题 + 最终 SVG 里的标签重叠（见 benchmarks/）
 ```
 
 本地预览是一个模拟聊天页：不用接入 Claude 或 ChatGPT，就能在自己电脑上看卡片效果、切换亮/暗主题、试点选原子。
