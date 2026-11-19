@@ -146,7 +146,7 @@ def test_substituent_drawn_into_a_ring_loses(smiles):
     rdCoordGen.AddCoords(m)
     assert layout_quality(m)["inside"] >= 1
     chosen = Chem.MolFromSmiles(smiles)
-    assert _layout(chosen) == "rdkit-templates"
+    assert _layout(chosen) != "coordgen"   # a template or projected perspective wins instead
     assert layout_quality(chosen)["inside"] == 0
 
 
@@ -203,7 +203,7 @@ def test_rejects_invalid_geometry_even_in_the_last_resort(monkeypatch):
 
     smi = "C1/C=C/CCCCC1"
 
-    def wrong_template(mol):
+    def wrong_template(mol, worth_trying=None):
         trial = Chem.Mol(mol)
         rdCoordGen.AddCoords(trial)
         yield "template:test", trial

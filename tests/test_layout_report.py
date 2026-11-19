@@ -117,3 +117,26 @@ def test_overall_rate_counts_each_cid_once():
     assert "| all samples | 3 | 2 (67%)" in text
     assert "| **all, unique compounds (by CID)** | 2 | 1 (50%)" in text
     assert "a = a again (CID 1)" in text
+
+
+# ---- the per-[a.b.c] table applies the layout chooser's stereo check first ------------
+
+def test_bicyclo_candidates_rejected_for_double_bond_geometry_are_reported_as_such():
+    # trans-cyclooctene fused to cyclohexane: the flat fused construction draws the 8-ring
+    # as a regular octagon, which makes the double bond cis. The chooser discards it before
+    # scoring, so the report must say so rather than "CoordGen scored better".
+    from chemcard.chem.render import layout_problem
+
+    smiles = "C1/C=C/CCC2CCCCC2C1"
+    r = report.evaluate({"name": "trans-bicyclo[6.4.0]dodec-2-ene", "category": "test", "cid": "0",
+                         "heavy_atoms": "12", "smiles": smiles})
+    [row] = r["bicyclo"]
+    assert row["abc"] == "6.4.0" and not row["adopted"]
+    assert row["rejected"] and all(p.startswith("double-bond geometry") for p in row["rejected"].values())
+    assert row["reason"] == "rejected: double-bond geometry"
+    text = "\n".join(report.summarise([r]))
+    assert "rejected: double-bond geometry (1: trans-bicyclo[6.4.0]dodec-2-ene)" in text
+    # the final drawing itself keeps the trans bond
+    from chemcard.chem.render import _layout, mol_from_smiles, render_smiles
+    m = mol_from_smiles(render_smiles(smiles).canonical_smiles)
+    assert not _layout(m).endswith("-fused1") and layout_problem(m, m) is None

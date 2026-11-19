@@ -78,3 +78,50 @@ buprenorphine's extra 6,14-bridge is not part of the template and got drawn acro
 the rings (6 crossings vs 2 for CoordGen). Fixed: a template now wins outright only if
 it adds no crossing beyond its own textbook bridge; otherwise it competes on score.
 Buprenorphine now gets CoordGen; the other nine morphinans keep their templates.
+
+## 2026-11-19 — bicyclo[a.b.c]: topology first, then the drawing
+
+`perspective.bicyclo_systems` recognises every bicyclo[a.b.c] ring system, including
+c = 0 (fused, bridgeheads bonded). The drawing follows from the bridge lengths: fused
+systems are laid flat; bridged ones get projected perspectives, judged only after the
+substituents are placed, and a flat drawing built from the three path lengths when no
+projection comes out clean. `REPORT.md` has the per-[a.b.c] table (recognised /
+candidates / adopted / why not); the figure in the top-level README shows final cards.
+
+Clean share 84 % of samples, 83 % of unique compounds (192/230; 191 before this PR —
+epibatidine's render overlap is gone). No new flags; still no missed clean candidate.
+
+Adopted drawings (each final card looked at):
+
+- projected perspective, 12 samples = 11 compounds: [2.2.2] bicyclo[2.2.2]octane, DABCO,
+  quinuclidine, barrelene, quinine (its quinuclidine; the quinoline is a separate fused
+  system), eucalyptol = 1,8-cineole (busier than CoordGen's drawing — the methyl on the
+  bridgehead sits near the O — but no counted defect); [2.2.1] norbornene,
+  norbornadiene, 7-oxanorbornane, epibatidine; [3.2.1] atropine
+- constructed flat view, 6: cocaine, tropinone ([3.2.1]), anatoxin-a ([4.2.1]),
+  fenchone ([2.2.1]), α-pinene, β-pinene ([3.1.1]) — their projections are crowded
+  once substituents are placed; the flat views look like RDKit's template drawing (the
+  tropanes with the N-methyl kept out of the ring). Each of the three bridges is tried
+  as the inner one, even when two are equally long: the pinenes only got a clean flat
+  view once the gem-dimethyl bridge could go outside. (β-pinene was wrongly listed as
+  projected in an earlier version of this note.)
+- not adopted: camphor, borneol, isoborneol, norbornane (hand-tuned [2.2.1] view first);
+  every fused system (the engines already draw them this way); thujone ([3.1.0]: no
+  usable view)
+
+The per-[a.b.c] table applies `layout_problem` to every candidate first, as the layout
+chooser does, and reports a rejected one as such ("rejected: double-bond geometry" for
+the flat fused drawing of trans-bicyclo[6.4.0]dodec-2-ene) instead of comparing scores.
+
+Outside the benchmark (tests): Cl-bicyclo[2.2.2]octane keeps its third-ranked projected
+view (the first two put the Cl on a bond once placed); [1.1.1], [3.3.3], [4.4.4] get
+constructed flat views (no projection has exactly one clean crossing); [4.3.2] keeps its
+projection; decalin is recognised as [4.4.0] and drawn flat around the shared bond.
+
+Run time, best of two passes over all 231 samples, before → after: total 7.13 → 7.34 s,
+median 12.0 → 13.1 ms (within machine noise). Bicycles whose projection is not clean pay
+for up to 12 placements plus the flat views (cocaine +78 ms, the most); camphor is 76 ms
+faster because no 3D embedding runs once the hand-tuned view has won. Outside the
+benchmark, the [4.4.4] card takes ~0.2 s and [1.1.1] ~0.15 s (no projection works, so
+all 12 placements and the flat views run). Molecules above 40 heavy atoms still skip
+the embedding.
